@@ -69,8 +69,9 @@ static AURGB unboxed(NSValue *value) {
         float w = weights[i].floatValue, h, s, v;
         AURGBToHSV(c, &h, &s, &v);
         if (s > 0.18f && v > 0.18f) _gray = NO;
-        // Colorful, not too dark, and enough of the cover that it reads as the cover's: a 3% fleck is not the theme.
-        float score = w < 0.03f ? -1 : s * sqrtf(fminf(v, 0.85f)) * sqrtf(w + 0.05f);
+        // Colorful and bright, with enough of the cover that it reads as the cover's (a 3% fleck is not the theme):
+        // the share counts only weakly, so a vivid tenth beats a dark navy two thirds, the way a designer would pick.
+        float score = w < 0.03f ? -1 : s * fminf(v, 0.9f) * powf(w, 0.3f);
         if (score > bestScore) {
             bestScore = score;
             _accent = c;
