@@ -40,7 +40,7 @@ jobs:
           AURA_MODELS_URL: ${{ secrets.AURA_MODELS_URL }}
         run: |
           test -n "$AURA_MODELS_URL" || { echo "::error::AURA_MODELS_URL secret is not set"; exit 1; }
-          gmake -j4 FINALPACKAGE=1 AURA_VERSION="0.1.0-${GITHUB_SHA::7}" AURA_MODELS_URL="$AURA_MODELS_URL"
+          gmake -j4 FINALPACKAGE=1 AURA_VERSION="0.2.0-${GITHUB_SHA::7}" AURA_MODELS_URL="$AURA_MODELS_URL"
 
       - name: Check the dylib
         run: |
@@ -61,6 +61,32 @@ jobs:
           python -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" -q install coremltools numpy pillow
           "$RUNNER_TEMP/venv/bin/python" scripts/check_models.py "$AURA_MODELS_URL"
+
+      # Aura's own pipeline and renderer, built for Mac Catalyst, on real covers fetched from Spotify's CDN.
+      - name: Effects harness (Mac Catalyst)
+        continue-on-error: true
+        env:
+          AURA_MODELS_URL: ${{ secrets.AURA_MODELS_URL }}
+        run: |
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          IOS="$SDK/System/iOSSupport"
+          clang -target arm64-apple-ios17.0-macabi -isysroot "$SDK" -iframework "$IOS/System/Library/Frameworks" \
+            -F "$IOS/System/Library/Frameworks" -L"$IOS/usr/lib" -fobjc-arc -ISources \
+            -DAURA_VERSION='"harness"' -DAURA_MODELS_URL="\"$AURA_MODELS_URL\"" \
+            Tests/AUHarness.m Sources/Core/AUCore.m Sources/Core/AUManifest.m Sources/Core/AUModelManager.m \
+            Sources/Features/AUImage.m Sources/Features/AUPalette.m Sources/Features/AUVision.m Sources/UI/AUParallaxRenderer.m \
+            -framework UIKit -framework CoreML -framework Vision -framework Metal -framework CoreImage -framework Accelerate \
+            -framework ImageIO -framework CoreVideo -framework QuartzCore -framework CoreGraphics -o aura-harness
+          mkdir -p covers harness
+          while read -r name id; do curl -fsSL -A "Aura-CI/1.0" -o "covers/$name.jpg" "https://i.scdn.co/image/$id"; done < Tests/covers.txt
+          ./aura-harness harness covers/*.jpg
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: harness-images
+          path: harness/
+          retention-days: 5
 
       # The repository is public and so are its artifacts: the dylib carries the model server's address, so it is
       # uploaded encrypted with a key that only lives in the repository's secrets.

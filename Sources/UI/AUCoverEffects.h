@@ -1,19 +1,22 @@
-// The redesigned player's cover with Aura's effects on it.
+// The redesigned player's artwork with Aura's effects, in either of the two places Taurus draws it:
 //
-// Taurus's tree (PlayerArtwork.x): CoverArtCellImpl > ... > CoverArtTiltView (354 x 354) > an ElementView the same
-// size (the cover Taurus rounds and shrinks while paused) > ImageViewProxy > Encore.ImageView > UIImageView. Each
-// queue cell has one; the one on screen is in a window with nothing hidden over it, nearest the window's middle.
+// - The cover (any background but Fill). Taurus's tree (PlayerArtwork.x): CoverArtCellImpl > ... > CoverArtTiltView
+//   (354 x 354) > an ElementView the same size (the cover, rounded and shrunk while paused) > ImageViewProxy > ...
+//   Aura's picture goes inside the ElementView (so it takes its corners, its shrink and Taurus hiding it under an
+//   animated artwork); the subject goes in the tilt view above it, unclipped, so it steps out of the frame.
+// - Fill (the cover stretched over the top of the screen, Kit/SGRField.m): SGRArtworkField's `_fill` layer, aspect
+//   filled, faded out by a gradient mask, with four blurred bands over its foot. Aura's picture goes in as `_fill`'s
+//   lowest sublayer, so the mask and the bands lie over it as over the cover; the subject goes above `_fill`, fading
+//   later than it, so the artist stays sharp where the cover has already melted into the player.
 //
-// Aura lays its own plane over the cover inside the ElementView (so it takes the cover's corners, its paused shrink
-// and Taurus's hiding of it under an animated artwork) and the subject, when there is one, in the tilt view above
-// the cover, unclipped, so it can step out of the frame. Spotify's own image stays underneath, untouched.
+// Spotify's and Taurus's own pictures stay underneath, untouched.
 #import <UIKit/UIKit.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 void AUCoverEffectsStart(void);
-// From the tilt view's layout and window hooks.
 void AUCoverEffectsTiltLaidOut(UIView *tilt);
+void AUCoverEffectsFieldLaidOut(UIView *field);
 UIView *_Nullable AUCoverEffectsPlayerRoot(void);
 
 NS_ASSUME_NONNULL_END

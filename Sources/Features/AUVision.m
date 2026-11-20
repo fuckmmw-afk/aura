@@ -17,6 +17,14 @@ static CIContext *ciContext(void) {
     return context;
 }
 
+// A Core Image result as plain 8-bit sRGB: Core Image's own default can be a float format a texture loader reads wrong.
+static CGImageRef rgba8(CIImage *image, CGRect rect) {
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGImageRef made = [ciContext() createCGImage:[image imageByCroppingToRect:rect] fromRect:rect format:kCIFormatRGBA8 colorSpace:space];
+    CGColorSpaceRelease(space);
+    return made;
+}
+
 static MLFeatureValue *imageFeature(MLModel *model, NSString *name, CGImageRef image, NSString **error) {
     MLFeatureDescription *description = model.modelDescription.inputDescriptionsByName[name];
     MLImageConstraint *constraint = description.imageConstraint;
@@ -195,7 +203,7 @@ AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error)
         CIImage *maskCI = [[[CIImage imageWithCGImage:maskImage] imageByClampingToExtent] imageByApplyingGaussianBlurWithSigma:radius * 0.6];
         CIImage *dim = [blurred imageByApplyingFilter:@"CIColorControls" withInputParameters:@{@"inputBrightness": @(-0.08), @"inputSaturation": @1.05}];
         CIImage *mixed = [dim imageByApplyingFilter:@"CIBlendWithMask" withInputParameters:@{@"inputBackgroundImage": blurred, @"inputMaskImage": maskCI}];
-        result.background = [ciContext() createCGImage:[mixed imageByCroppingToRect:cover.extent] fromRect:cover.extent];
+        result.background = rgba8(mixed, cover.extent);
         CGImageRelease(maskImage);
         result.bounds = CGRectMake((double)minX / mw, (double)minY / mh, (double)(maxX - minX + 1) / mw, (double)(maxY - minY + 1) / mh);
         result.coverage = coverage;
@@ -257,7 +265,7 @@ CGImageRef AUUpscaled(CGImageRef image, size_t maxSide, NSString **error) {
         CGFloat left = rect.origin.x == 0 ? 0 : overlap / 2, top = rect.origin.y == 0 ? 0 : overlap / 2;
         CGFloat right = CGRectGetMaxX(rect) >= width ? 0 : overlap / 2, bottom = CGRectGetMaxY(rect) >= height ? 0 : overlap / 2;
         CIImage *output = [CIImage imageWithCVPixelBuffer:buffer];
-        CGImageRef made = [ciContext() createCGImage:output fromRect:output.extent];
+        CGImageRef made = rgba8(output, output.extent);
         if (!made) continue;
         // Core Graphics counts from the bottom: a tile at y from the top lands at outHeight - (y + h) * scale.
         CGRect target = CGRectMake(rect.origin.x * scale, outHeight - CGRectGetMaxY(rect) * scale, rect.size.width * scale, rect.size.height * scale);

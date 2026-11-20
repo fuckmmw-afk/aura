@@ -1,7 +1,7 @@
 TARGET := iphone:clang:latest:16.0
 ARCHS := arm64
 FINALPACKAGE ?= 1
-AURA_VERSION ?= 0.1.0
+AURA_VERSION ?= 0.2.0
 # The model server's base URL comes from the build environment (a GitHub secret in CI), never from the repository.
 AURA_MODELS_URL ?=
 

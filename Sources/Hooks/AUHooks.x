@@ -21,6 +21,19 @@
 %end
 %end
 
+%group Field
+%hook SGRArtworkField
+- (void)layoutSubviews {
+    %orig;
+    AUCoverEffectsFieldLaidOut((UIView *)self);
+}
+- (void)setFills:(BOOL)fills {
+    %orig;
+    AUCoverEffectsFieldLaidOut((UIView *)self);
+}
+%end
+%end
+
 %group Glass
 %hook UIVisualEffectView
 - (instancetype)initWithEffect:(UIVisualEffect *)effect {
@@ -70,6 +83,12 @@ static void start(void) {
         AUCoverEffectsStart();
     } else {
         AULog(@"no CoverArtTiltView in this Spotify: no cover effects");
+    }
+    if (NSClassFromString(@"SGRArtworkField")) {
+        %init(Field);
+        AUCoverEffectsStart();
+    } else {
+        AULog(@"no SGRArtworkField in Taurus: no effects on the Fill background");
     }
     if (NSClassFromString(@"UIGlassEffect")) %init(Glass);
     AUThemeStart();
