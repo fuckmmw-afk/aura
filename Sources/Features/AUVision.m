@@ -239,6 +239,7 @@ AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error)
         size_t mw = 0, mh = 0;
         uint8_t *alpha = NULL, *soft = NULL;
         NSUInteger kept = 0;
+        NSMutableArray<NSData *> *personMasks = [NSMutableArray array];   // each person's solid mask
         // People: each against its own peak, then the smoothstep; `soft` keeps the raw union for the overlap test.
         VNInstanceMaskObservation *people = (VNInstanceMaskObservation *)person.results.firstObject;
         if ([people respondsToSelector:@selector(allInstances)]) {
@@ -259,10 +260,14 @@ AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error)
                 AULog(@"cutout: person %lu peak %.2f", (unsigned long)index, peak / 255.0);
                 if (peak >= 38) {
                     float scale = 255.0f / peak;
+                    NSMutableData *solid = [NSMutableData dataWithLength:mw * mh];
+                    uint8_t *solidBytes = solid.mutableBytes;
                     for (size_t i = 0; i < mw * mh; i++) {
                         uint8_t v = sg_curve[(uint8_t)fminf(255, one[i] * scale)];
+                        solidBytes[i] = v;
                         if (v > alpha[i]) alpha[i] = v;
                     }
+                    [personMasks addObject:solid];
                     kept++;
                 }
                 free(one);
@@ -276,14 +281,21 @@ AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error)
                 uint8_t *one = instanceMask(subjects, index, handler, &mw, &mh);
                 if (!one) continue;
                 if (!alpha) alpha = calloc(mw * mh, 1);
-                double area = 0, overlap = 0;
-                for (size_t i = 0; i < mw * mh; i++) {
-                    area += one[i];
-                    if (soft) overlap += one[i] * (soft[i] / 255.0);
+                // Taken when most of some person lies inside it: a drawn character found as a person only by its
+                // legs is still whole in the foreground subject that holds those legs.
+                double area = 0, best = 0;
+                for (size_t i = 0; i < mw * mh; i++) area += one[i];
+                for (NSData *solid in personMasks) {
+                    const uint8_t *p = solid.bytes;
+                    double inside = 0, total = 0;
+                    for (size_t i = 0; i < mw * mh; i++) {
+                        total += p[i];
+                        inside += MIN(p[i], one[i]);
+                    }
+                    if (total > 0) best = MAX(best, inside / total);
                 }
-                AULog(@"cutout: subject %lu covers %.1f%%, %.0f%% of it person", (unsigned long)index, area / 255.0 / (mw * mh) * 100,
-                      area > 0 ? overlap / area * 100 : 0);
-                if (objects || (area > 0 && overlap / area > 0.25)) {
+                AULog(@"cutout: subject %lu covers %.1f%%, holds %.0f%% of a person", (unsigned long)index, area / 255.0 / (mw * mh) * 100, best * 100);
+                if (objects || best > 0.5) {
                     for (size_t i = 0; i < mw * mh; i++) {
                         uint8_t v = sg_curve[one[i]];
                         if (v > alpha[i]) alpha[i] = v;
