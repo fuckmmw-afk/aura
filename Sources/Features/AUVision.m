@@ -181,75 +181,119 @@ void AUCutoutResultRelease(AUCutoutResult *result) {
     result->cutout = result->background = NULL;
 }
 
+static uint8_t sg_curve[256];
+
+// One instance's mask as 8-bit, at the image's size, or NULL. `mw`/`mh` set by the first, later ones must match.
+static uint8_t *instanceMask(VNInstanceMaskObservation *observation, NSUInteger index, VNImageRequestHandler *handler,
+                             size_t *mw, size_t *mh) API_AVAILABLE(ios(17.0)) {
+    NSError *e = nil;
+    CVPixelBufferRef mask = [observation generateScaledMaskForImageForInstances:[NSIndexSet indexSetWithIndex:index]
+                                                             fromRequestHandler:handler error:&e];
+    if (!mask) return NULL;
+    size_t w = CVPixelBufferGetWidth(mask), h = CVPixelBufferGetHeight(mask);
+    uint8_t *bytes = NULL;
+    if ((!*mw || (w == *mw && h == *mh)) && CVPixelBufferGetPixelFormatType(mask) == kCVPixelFormatType_OneComponent32Float) {
+        *mw = w;
+        *mh = h;
+        bytes = malloc(w * h);
+        CVPixelBufferLockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
+        vImage_Buffer src = {CVPixelBufferGetBaseAddress(mask), h, w, CVPixelBufferGetBytesPerRow(mask)};
+        vImage_Buffer dst = {bytes, h, w, w};
+        if (vImageConvert_PlanarFtoPlanar8(&src, &dst, 1, 0, 0) != kvImageNoError) {
+            free(bytes);
+            bytes = NULL;
+        }
+        CVPixelBufferUnlockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
+    }
+    CVPixelBufferRelease(mask);
+    return bytes;
+}
+
 AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error) {
     AUCutoutResult result = {NULL, NULL, CGRectZero, 0};
     if (@available(iOS 17.0, *)) {
-        Class requestClass = NSClassFromString(objects ? @"VNGenerateForegroundInstanceMaskRequest" : @"VNGeneratePersonInstanceMaskRequest");
-        if (!requestClass) {
-            if (error) *error = @"no instance mask request";
-            return result;
-        }
-        VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:image options:@{}];
-        VNImageBasedRequest *request = [requestClass new];
-        NSError *e = nil;
-        if (![handler performRequests:@[request] error:&e]) {
-            if (error) *error = e.localizedDescription ?: @"Vision failed";
-            return result;
-        }
-        VNInstanceMaskObservation *observation = (VNInstanceMaskObservation *)request.results.firstObject;
-        if (![observation respondsToSelector:@selector(allInstances)] || !observation.allInstances.count) {
-            if (error) *error = @"no subject";
-            return result;
-        }
-        // Each subject on its own: Vision is unsure of drawn people (a cover's illustration) and can give one a mask
-        // that peaks at a third while a photographed one beside it is solid. Each instance's mask is read against its
-        // own peak, then a smoothstep from 0.25 to 0.6 makes the sure parts solid and drops the faint fringe; the
-        // instances are joined by their maximum. An instance that never passes 0.15 is noise and left out.
-        static uint8_t curve[256];
         static dispatch_once_t once;
         dispatch_once(&once, ^{
             for (int i = 0; i < 256; i++) {
                 float x = fminf(1, fmaxf(0, (i / 255.0f - 0.25f) / 0.35f));
-                curve[i] = (uint8_t)lroundf(x * x * (3 - 2 * x) * 255);
+                sg_curve[i] = (uint8_t)lroundf(x * x * (3 - 2 * x) * 255);
             }
         });
-        size_t mw = 0, mh = 0;
-        uint8_t *alpha = NULL, *one = NULL;
-        NSUInteger kept = 0, seen = 0;
-        NSIndexSet *instances = observation.allInstances;
-        for (NSUInteger index = instances.firstIndex; index != NSNotFound && seen < 8; index = [instances indexGreaterThanIndex:index], seen++) {
-            CVPixelBufferRef mask = [observation generateScaledMaskForImageForInstances:[NSIndexSet indexSetWithIndex:index]
-                                                                     fromRequestHandler:handler error:&e];
-            if (!mask) continue;
-            if (!alpha) {
-                mw = CVPixelBufferGetWidth(mask);
-                mh = CVPixelBufferGetHeight(mask);
-                alpha = calloc(mw * mh, 1);
-                one = malloc(mw * mh);
-            }
-            BOOL fits = CVPixelBufferGetWidth(mask) == mw && CVPixelBufferGetHeight(mask) == mh
-                && CVPixelBufferGetPixelFormatType(mask) == kCVPixelFormatType_OneComponent32Float;
-            CVPixelBufferLockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
-            vImage_Buffer src = {CVPixelBufferGetBaseAddress(mask), mh, mw, CVPixelBufferGetBytesPerRow(mask)};
-            vImage_Buffer dst = {one, mh, mw, mw};
-            BOOL converted = fits && vImageConvert_PlanarFtoPlanar8(&src, &dst, 1, 0, 0) == kvImageNoError;
-            CVPixelBufferUnlockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
-            CVPixelBufferRelease(mask);
-            if (!converted) continue;
-            uint8_t peak = 0;
-            for (size_t i = 0; i < mw * mh; i++) if (one[i] > peak) peak = one[i];
-            if (peak < 38) continue;
-            float scale = 255.0f / peak;
-            for (size_t i = 0; i < mw * mh; i++) {
-                uint8_t v = curve[(uint8_t)fminf(255, one[i] * scale)];
-                if (v > alpha[i]) alpha[i] = v;
-            }
-            kept++;
+        Class personClass = NSClassFromString(@"VNGeneratePersonInstanceMaskRequest");
+        Class foregroundClass = NSClassFromString(@"VNGenerateForegroundInstanceMaskRequest");
+        if (!foregroundClass || (!objects && !personClass)) {
+            if (error) *error = @"no instance mask request";
+            return result;
         }
-        free(one);
+        // People, and the foreground subjects (as the Photos app lifts them) in the same pass. Vision is unsure of
+        // drawn people (a cover's illustration): it can find a character's legs as a person and the rest only
+        // faintly. A foreground subject that the faint person mask covers by a quarter is taken whole as a person.
+        VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCGImage:image options:@{}];
+        VNImageBasedRequest *foreground = [foregroundClass new];
+        VNImageBasedRequest *person = objects ? nil : [personClass new];
+        NSError *e = nil;
+        if (![handler performRequests:person ? @[person, foreground] : @[foreground] error:&e]) {
+            if (error) *error = e.localizedDescription ?: @"Vision failed";
+            return result;
+        }
+        size_t mw = 0, mh = 0;
+        uint8_t *alpha = NULL, *soft = NULL;
+        NSUInteger kept = 0;
+        // People: each against its own peak, then the smoothstep; `soft` keeps the raw union for the overlap test.
+        VNInstanceMaskObservation *people = (VNInstanceMaskObservation *)person.results.firstObject;
+        if ([people respondsToSelector:@selector(allInstances)]) {
+            NSIndexSet *instances = people.allInstances;
+            NSUInteger seen = 0;
+            for (NSUInteger index = instances.firstIndex; index != NSNotFound && seen < 8; index = [instances indexGreaterThanIndex:index], seen++) {
+                uint8_t *one = instanceMask(people, index, handler, &mw, &mh);
+                if (!one) continue;
+                if (!alpha) {
+                    alpha = calloc(mw * mh, 1);
+                    soft = calloc(mw * mh, 1);
+                }
+                uint8_t peak = 0;
+                for (size_t i = 0; i < mw * mh; i++) {
+                    if (one[i] > peak) peak = one[i];
+                    if (one[i] > soft[i]) soft[i] = one[i];
+                }
+                if (peak >= 38) {
+                    float scale = 255.0f / peak;
+                    for (size_t i = 0; i < mw * mh; i++) {
+                        uint8_t v = sg_curve[(uint8_t)fminf(255, one[i] * scale)];
+                        if (v > alpha[i]) alpha[i] = v;
+                    }
+                    kept++;
+                }
+                free(one);
+            }
+        }
+        VNInstanceMaskObservation *subjects = (VNInstanceMaskObservation *)foreground.results.firstObject;
+        if ([subjects respondsToSelector:@selector(allInstances)] && (objects || soft)) {
+            NSIndexSet *instances = subjects.allInstances;
+            NSUInteger seen = 0;
+            for (NSUInteger index = instances.firstIndex; index != NSNotFound && seen < 8; index = [instances indexGreaterThanIndex:index], seen++) {
+                uint8_t *one = instanceMask(subjects, index, handler, &mw, &mh);
+                if (!one) continue;
+                if (!alpha) alpha = calloc(mw * mh, 1);
+                double area = 0, overlap = 0;
+                for (size_t i = 0; i < mw * mh; i++) {
+                    area += one[i];
+                    if (soft) overlap += one[i] * (soft[i] / 255.0);
+                }
+                if (objects || (area > 0 && overlap / area > 0.25)) {
+                    for (size_t i = 0; i < mw * mh; i++) {
+                        uint8_t v = sg_curve[one[i]];
+                        if (v > alpha[i]) alpha[i] = v;
+                    }
+                    kept++;
+                }
+                free(one);
+            }
+        }
+        free(soft);
         if (!alpha || !kept) {
             free(alpha);
-            if (error) *error = e.localizedDescription ?: @"no mask";
+            if (error) *error = objects ? @"no subject" : @"no person";
             return result;
         }
         size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image);
