@@ -117,6 +117,64 @@ CGImageRef AUDepthMap(CGImageRef image, NSString **error) {
 
 #pragma mark - cutout
 
+// The cover with the subject's room filled from what is around it and softened, by normalized convolution at 256 px:
+// blur(cover x keep) / blur(keep), keep being 0 on the subject (grown a little) and 1 elsewhere. Scaled back up to
+// the cover's size, which the blur makes smooth.
+static CGImageRef inpaintedBackground(CGImageRef cover, CGImageRef mask) {
+    enum { kSide = 256 };
+    const size_t n = kSide * kSide;
+    uint8_t *rgba = calloc(n * 4, 1), *m8 = calloc(n, 1), *grown = calloc(n, 1);
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef c = CGBitmapContextCreate(rgba, kSide, kSide, 8, kSide * 4, space, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
+    CGContextSetInterpolationQuality(c, kCGInterpolationHigh);
+    CGContextDrawImage(c, CGRectMake(0, 0, kSide, kSide), cover);
+    CGContextRelease(c);
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    CGContextRef g = CGBitmapContextCreate(m8, kSide, kSide, 8, kSide, gray, (CGBitmapInfo)kCGImageAlphaNone);
+    CGContextDrawImage(g, CGRectMake(0, 0, kSide, kSide), mask);
+    CGContextRelease(g);
+    CGColorSpaceRelease(gray);
+    vImage_Buffer m8b = {m8, kSide, kSide, kSide}, grownb = {grown, kSide, kSide, kSide};
+    vImageMax_Planar8(&m8b, &grownb, NULL, 0, 0, 9, 9, kvImageEdgeExtend);
+    float *keep = malloc(n * sizeof(float)), *channel = malloc(n * sizeof(float)), *num = malloc(n * sizeof(float));
+    float *den = malloc(n * sizeof(float)), *tmp = malloc(n * sizeof(float));
+    for (size_t i = 0; i < n; i++) keep[i] = 1.0f - grown[i] / 255.0f;
+    // A gaussian of sigma ~6% of the side, as one separable kernel.
+    enum { kRadius = 30 };
+    float kernel[2 * kRadius + 1], sum = 0, sigma = kSide * 0.06f;
+    for (int i = -kRadius; i <= kRadius; i++) sum += kernel[i + kRadius] = expf(-(float)(i * i) / (2 * sigma * sigma));
+    for (int i = 0; i <= 2 * kRadius; i++) kernel[i] /= sum;
+    vImage_Buffer keepb = {keep, kSide, kSide, kSide * sizeof(float)}, denb = {den, kSide, kSide, kSide * sizeof(float)};
+    vImage_Buffer tmpb = {tmp, kSide, kSide, kSide * sizeof(float)}, numb = {num, kSide, kSide, kSide * sizeof(float)};
+    vImageSepConvolve_PlanarF(&keepb, &denb, NULL, 0, 0, kernel, 2 * kRadius + 1, kernel, 2 * kRadius + 1, 0, 0, kvImageEdgeExtend);
+    uint8_t *out = calloc(n * 4, 1);
+    for (int ch = 0; ch < 3; ch++) {
+        double mean = 0;
+        for (size_t i = 0; i < n; i++) {
+            channel[i] = rgba[i * 4 + ch] / 255.0f;
+            mean += channel[i];
+            tmp[i] = channel[i] * keep[i];
+        }
+        mean /= n;
+        vImageSepConvolve_PlanarF(&tmpb, &numb, NULL, 0, 0, kernel, 2 * kRadius + 1, kernel, 2 * kRadius + 1, 0, 0, kvImageEdgeExtend);
+        for (size_t i = 0; i < n; i++) {
+            // Where the subject took everything around, the cover's own mean stands in; slightly dimmed throughout,
+            // so the subject reads in front of it.
+            float value = (num[i] + (float)mean * 1e-3f) / (den[i] + 1e-3f);
+            out[i * 4 + ch] = (uint8_t)lroundf(fminf(1, fmaxf(0, value * 0.9f)) * 255);
+        }
+    }
+    for (size_t i = 0; i < n; i++) out[i * 4 + 3] = 255;
+    CGContextRef o = CGBitmapContextCreate(out, kSide, kSide, 8, kSide * 4, space, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
+    CGImageRef small = CGBitmapContextCreateImage(o);
+    CGContextRelease(o);
+    CGColorSpaceRelease(space);
+    free(rgba); free(m8); free(grown); free(keep); free(channel); free(num); free(den); free(tmp); free(out);
+    CGImageRef full = AUImageResized(small, CGImageGetWidth(cover), CGImageGetHeight(cover));
+    CGImageRelease(small);
+    return full;
+}
+
 void AUCutoutResultRelease(AUCutoutResult *result) {
     if (result->cutout) CGImageRelease(result->cutout);
     if (result->background) CGImageRelease(result->background);
@@ -163,6 +221,18 @@ AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error)
             if (error) *error = @"mask format";
             return result;
         }
+        // Vision is unsure of drawn people (a cover's illustration): its mask can sit at a half, which drew the
+        // subject see-through. A smoothstep from 0.25 to 0.6 makes the sure parts solid and drops the faint specks.
+        static uint8_t curve[256];
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            for (int i = 0; i < 256; i++) {
+                float x = fminf(1, fmaxf(0, (i / 255.0f - 0.25f) / 0.35f));
+                curve[i] = (uint8_t)lroundf(x * x * (3 - 2 * x) * 255);
+            }
+        });
+        vImage_Buffer hard = {alpha, mh, mw, mw};
+        vImageTableLookUp_Planar8(&hard, &hard, curve, 0);
         // Coverage and the subject's box, rows top first.
         size_t minX = mw, minY = mh, maxX = 0, maxY = 0;
         double sum = 0;
@@ -195,15 +265,9 @@ AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error)
         result.cutout = CGBitmapContextCreateImage(context);
         CGContextRelease(context);
 
-        // The background: the cover blurred (its edges clamped so the blur does not darken them) and dimmed where
-        // the subject stood, so the subject's own ghost does not show behind it as it moves.
-        CIImage *cover = [CIImage imageWithCGImage:image];
-        double radius = MAX(width, height) * 0.035;
-        CIImage *blurred = [[cover imageByClampingToExtent] imageByApplyingGaussianBlurWithSigma:radius];
-        CIImage *maskCI = [[[CIImage imageWithCGImage:maskImage] imageByClampingToExtent] imageByApplyingGaussianBlurWithSigma:radius * 0.6];
-        CIImage *dim = [blurred imageByApplyingFilter:@"CIColorControls" withInputParameters:@{@"inputBrightness": @(-0.08), @"inputSaturation": @1.05}];
-        CIImage *mixed = [dim imageByApplyingFilter:@"CIBlendWithMask" withInputParameters:@{@"inputBackgroundImage": blurred, @"inputMaskImage": maskCI}];
-        result.background = rgba8(mixed, cover.extent);
+        // The background: the cover with the subject's room filled from around it, then blurred, so no ghost of the
+        // subject shows behind it as it moves.
+        result.background = inpaintedBackground(image, maskImage);
         CGImageRelease(maskImage);
         result.bounds = CGRectMake((double)minX / mw, (double)minY / mh, (double)(maxX - minX + 1) / mw, (double)(maxY - minY + 1) / mh);
         result.coverage = coverage;
