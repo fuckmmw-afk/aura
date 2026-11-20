@@ -1,7 +1,7 @@
 #import "AUCoverEffects.h"
-#import "AUParallaxRenderer.h"
 #import "Core/AUCore.h"
 #import "Core/AUTaurus.h"
+#import "Features/AUDepthLayers.h"
 #import "Features/AUPipeline.h"
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
@@ -9,8 +9,9 @@
 #import <objc/runtime.h>
 
 static const CGFloat kCoverMinWidth = 200;
-static const CGFloat kStepOut = 1.07;            // the subject's scale over the cover, from its foot
+static const CGFloat kStepOut = 1.07;            // the subject's scale over the cover, from its foot (the cover only)
 static const CGFloat kMaxTilt = 0.22;            // gravity change (≈ radians) for a full shift
+static const CGFloat kStrength = 0.04;           // a full tilt moves a layer at depth d by kStrength * side * (d - 0.5)
 static const CFTimeInterval kSubjectWait = 0.35; // how long a cover with a subject still to come waits for it
 
 typedef NS_ENUM(NSInteger, AUSurfaceKind) {
@@ -18,15 +19,27 @@ typedef NS_ENUM(NSInteger, AUSurfaceKind) {
     AUSurfaceFill,
 };
 
-// One place the effects are drawn: its renderer's layer and the subject's layer.
+// The layers an artwork is shown with, made once off the main queue.
+@interface AUShownLayers : NSObject
+@property (nonatomic, weak) AUArtwork *artwork;
+@property (nonatomic) BOOL depth, subject;
+@property (nonatomic, strong) id far, middle, near;   // CGImageRef as id
+@end
+
+@implementation AUShownLayers
+@end
+
+// One place the effects are drawn: a stage of three depth layers, and the subject.
 @interface AUSurface : NSObject
 @property (nonatomic) AUSurfaceKind kind;
-@property (nonatomic, strong) AUParallaxRenderer *renderer;
+@property (nonatomic, strong) CALayer *stage;
+@property (nonatomic, strong) NSArray<CALayer *> *planes;
+@property (nonatomic, strong) CALayer *subjectClip;          // Fill: the fill's frame, clipped, faded later than it
 @property (nonatomic, strong) CALayer *subject;
-@property (nonatomic, strong) CAGradientLayer *subjectMask;   // Fill only
-@property (nonatomic, weak) id contentArtwork;                  // the artwork its textures hold
-@property (nonatomic) BOOL contentDepth, contentSubject;
+@property (nonatomic, strong) CAGradientLayer *subjectMask;
+@property (nonatomic, weak) AUShownLayers *content;
 @property (nonatomic) BOOL attached;
+@property (nonatomic) CGRect pictureRect;                    // where the cover is drawn in the stage, zoomed
 @end
 
 @implementation AUSurface
@@ -61,15 +74,28 @@ static NSDictionary *noActions(void) {
     dispatch_once(&once, ^{
         id off = NSNull.null;
         none = @{@"bounds": off, @"position": off, @"frame": off, @"contents": off, @"opacity": off, @"transform": off,
-                 @"hidden": off, @"sublayerTransform": off, @"mask": off};
+                 @"hidden": off, @"sublayerTransform": off, @"mask": off, @"anchorPoint": off};
     });
     return none;
+}
+
+static CALayer *plainLayer(void) {
+    CALayer *layer = [CALayer layer];
+    layer.actions = noActions();
+    layer.contentsGravity = kCAGravityResize;
+    return layer;
 }
 
 static CALayer *ivarLayer(id object, const char *name) {
     Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
     id value = ivar ? object_getIvar(object, ivar) : nil;
     return [value isKindOfClass:CALayer.class] ? value : nil;
+}
+
+// An artwork published for another track than the one playing is not shown.
+static BOOL forCurrentTrack(AUArtwork *artwork) {
+    NSString *playing = AUTaurusTrackURI();
+    return !playing.length || !artwork.trackURI.length || [artwork.trackURI isEqualToString:playing];
 }
 
 @implementation AUCoverEffects {
@@ -79,17 +105,19 @@ static CALayer *ivarLayer(id object, const char *name) {
     UIView *_plane;                  // over the cover, inside it, clipped to its corners
     UIView *_subjectHost;            // a zero-size view in the tilt view, so nothing takes it for the cover
     AUSurface *_coverSurface, *_fillSurface;
+    AUShownLayers *_layers;          // what the surfaces show
     __weak AUArtwork *_shown;
     NSString *_shownKey;
-    BOOL _shownDepth, _shownSubject, _wantPlane;
-    CADisplayLink *_link;            // only while the phone moves or the covers scroll
+    BOOL _shownDepth, _shownSubject, _wantPlane, _building;
+    dispatch_queue_t _work;
+    CADisplayLink *_link;
     CFTimeInterval _lastMove;
     CMMotionManager *_motion;
     NSOperationQueue *_motionQueue;
     BOOL _motionOn;
     double _refX, _refY;
     BOOL _refSet;
-    CGPoint _tiltNow;                // smoothed, -1...1
+    CGPoint _tiltNow;
     BOOL _pickScheduled, _active, _waitScheduled;
     NSUInteger _frames;
 }
@@ -104,6 +132,7 @@ static CALayer *ivarLayer(id object, const char *name) {
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     _tilts = [NSHashTable weakObjectsHashTable];
+    _work = dispatch_queue_create("aura.layers", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
     _motion = [CMMotionManager new];
     _motionQueue = [NSOperationQueue new];
     _motionQueue.maxConcurrentOperationCount = 1;
@@ -115,9 +144,7 @@ static CALayer *ivarLayer(id object, const char *name) {
     [center addObserver:self selector:@selector(refresh) name:AUThrottleDidChangeNotification object:nil];
     [center addObserver:self selector:@selector(becameActive) name:UIApplicationDidBecomeActiveNotification object:nil];
     [center addObserver:self selector:@selector(resignedActive) name:UIApplicationWillResignActiveNotification object:nil];
-    [center addObserver:self selector:@selector(memoryWarning) name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
     [center addObserver:self selector:@selector(trackChanged:) name:AUTrackDidChangeNotification object:nil];
-    if (![AUParallaxRenderer supported]) AULog(@"cover effects: no Metal device");
     return self;
 }
 
@@ -161,7 +188,6 @@ static UIView *taurusField(void) {
     return field ? field() : nil;
 }
 
-// Taurus's Fill background, when it is the one showing: the field's `_fill` layer, not hidden.
 - (CALayer *)fillLayerShowing {
     UIView *field = _field ?: taurusField();
     if (!field || !showing(field)) return nil;
@@ -225,11 +251,16 @@ static UIView *taurusField(void) {
 - (AUSurface *)makeSurface:(AUSurfaceKind)kind {
     AUSurface *surface = [AUSurface new];
     surface.kind = kind;
-    surface.renderer = [AUParallaxRenderer new];
-    surface.renderer.layer.actions = noActions();
-    CALayer *subject = [CALayer layer];
-    subject.actions = noActions();
-    subject.contentsGravity = kind == AUSurfaceFill ? kCAGravityResizeAspectFill : kCAGravityResize;
+    surface.stage = plainLayer();
+    surface.stage.masksToBounds = YES;
+    NSMutableArray *planes = [NSMutableArray array];
+    for (int k = 0; k < 3; k++) {
+        CALayer *plane = plainLayer();
+        [surface.stage addSublayer:plane];
+        [planes addObject:plane];
+    }
+    surface.planes = planes;
+    CALayer *subject = plainLayer();
     subject.opacity = 0;
     if (kind == AUSurfaceCover) {
         subject.shadowColor = UIColor.blackColor.CGColor;
@@ -240,13 +271,17 @@ static UIView *taurusField(void) {
         subject.shouldRasterize = YES;
         subject.rasterizationScale = UIScreen.mainScreen.scale;
     } else {
-        subject.masksToBounds = YES;
-        // The subject fades later than Taurus's fill (0.76...0.985 of its height): it stays where the cover has melted.
+        // Fill: the subject in a clip the fill's size, fading later than Taurus's fill (0.76...0.985 of its height),
+        // so it stays where the cover has melted into the player.
+        CALayer *clip = plainLayer();
+        clip.masksToBounds = YES;
         CAGradientLayer *mask = [CAGradientLayer layer];
         mask.actions = noActions();
         mask.colors = @[(id)UIColor.whiteColor.CGColor, (id)UIColor.whiteColor.CGColor, (id)[UIColor colorWithWhite:1 alpha:0].CGColor];
         mask.locations = @[@0, @0.86, @1];
-        subject.mask = mask;
+        clip.mask = mask;
+        [clip addSublayer:subject];
+        surface.subjectClip = clip;
         surface.subjectMask = mask;
     }
     surface.subject = subject;
@@ -254,8 +289,6 @@ static UIView *taurusField(void) {
 }
 
 - (void)pick {
-    if (![AUParallaxRenderer supported]) return;
-    // Fill first: in Fill Taurus has no square cover on screen.
     CALayer *fill = [self fillLayerShowing];
     if (fill != _fillLayer || (fill && !_fillSurface.attached)) {
         [self detachFill];
@@ -273,6 +306,27 @@ static UIView *taurusField(void) {
     [self updateMotion];
 }
 
+#pragma mark - placing a surface
+
+// The picture aspect-filled into `bounds` and zoomed just enough that a full shift never shows its edge.
+static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
+    CGFloat side = MAX(bounds.size.width, bounds.size.height);
+    if (moving) side *= 1 + 2 * kStrength * 0.4 * AUNumber(AUKeyDepthStrength, 1.0);
+    return CGRectMake(CGRectGetMidX(bounds) - side / 2, CGRectGetMidY(bounds) - side / 2, side, side);
+}
+
+- (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, _shownDepth || _shownSubject);
+    for (CALayer *plane in surface.planes) {
+        plane.bounds = (CGRect){CGPointZero, surface.pictureRect.size};
+        plane.position = CGPointMake(CGRectGetMidX(surface.pictureRect), CGRectGetMidY(surface.pictureRect));
+    }
+    [CATransaction commit];
+    [self moveSurfaces];
+}
+
 #pragma mark - the cover
 
 - (void)attachCover {
@@ -285,13 +339,13 @@ static UIView *taurusField(void) {
         _subjectHost = [[UIView alloc] initWithFrame:CGRectZero];
         _subjectHost.userInteractionEnabled = NO;
     }
-    [_plane.layer addSublayer:_coverSurface.renderer.layer];
+    [_plane.layer addSublayer:_coverSurface.stage];
     [_subjectHost.layer addSublayer:_coverSurface.subject];
     [_cover addSubview:_plane];
     [_tilt addSubview:_subjectHost];
     _tilt.clipsToBounds = NO;
     _coverSurface.attached = YES;
-    _coverSurface.contentArtwork = nil;
+    _coverSurface.content = nil;
     [self layoutCover];
     AULog(@"effects on the cover (%.0f pt)", _cover.bounds.size.width);
     _shownKey = nil;
@@ -313,12 +367,11 @@ static UIView *taurusField(void) {
     _plane.layer.cornerCurve = kCACornerCurveContinuous;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    _coverSurface.renderer.layer.frame = _plane.bounds;
-    [_coverSurface.renderer layoutForScale:UIScreen.mainScreen.scale];
+    _coverSurface.stage.frame = _plane.bounds;
     [CATransaction commit];
     if (_subjectHost.superview == _tilt && _tilt.subviews.lastObject != _subjectHost) [_tilt bringSubviewToFront:_subjectHost];
     _subjectHost.frame = CGRectZero;
-    [self placeSubjects];
+    [self placeSurface:_coverSurface stageBounds:_plane.bounds];
 }
 
 - (CGFloat)imageCornerRadius {
@@ -339,14 +392,13 @@ static UIView *taurusField(void) {
 - (void)attachFill {
     if (!_fillSurface) _fillSurface = [self makeSurface:AUSurfaceFill];
     CALayer *fill = _fillLayer;
-    UIView *field = _field;
-    if (!fill || !field) return;
+    if (!fill || !_field) return;
     // Lowest in `_fill`: under its blurred bands, inside its fading mask.
-    [fill insertSublayer:_fillSurface.renderer.layer atIndex:0];
-    if (fill.superlayer) [fill.superlayer insertSublayer:_fillSurface.subject above:fill];
-    _fillSurface.renderer.layer.opacity = 0;
+    [fill insertSublayer:_fillSurface.stage atIndex:0];
+    if (fill.superlayer) [fill.superlayer insertSublayer:_fillSurface.subjectClip above:fill];
+    _fillSurface.stage.opacity = 0;
     _fillSurface.attached = YES;
-    _fillSurface.contentArtwork = nil;
+    _fillSurface.content = nil;
     [self layoutFill];
     AULog(@"effects on Taurus's Fill background (%.0f x %.0f pt)", fill.bounds.size.width, fill.bounds.size.height);
     _shownKey = nil;
@@ -354,8 +406,8 @@ static UIView *taurusField(void) {
 }
 
 - (void)detachFill {
-    [_fillSurface.renderer.layer removeFromSuperlayer];
-    [_fillSurface.subject removeFromSuperlayer];
+    [_fillSurface.stage removeFromSuperlayer];
+    [_fillSurface.subjectClip removeFromSuperlayer];
     _fillSurface.attached = NO;
 }
 
@@ -364,43 +416,51 @@ static UIView *taurusField(void) {
     if (!fill || !_fillSurface.attached) return;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    _fillSurface.renderer.layer.frame = fill.bounds;
-    // The whole screen at 3x would be two million pixels a frame; at 2x it is under one and still sharp under the fade.
-    [_fillSurface.renderer layoutForScale:2];
+    _fillSurface.stage.frame = fill.bounds;
+    _fillSurface.subjectClip.frame = fill.frame;
     _fillSurface.subjectMask.frame = (CGRect){CGPointZero, fill.bounds.size};
     [CATransaction commit];
-    [self placeSubjects];
+    [self placeSurface:_fillSurface stageBounds:fill.bounds];
 }
 
-#pragma mark - the subject's place
+#pragma mark - moving
 
-- (void)placeSubjects {
-    CGFloat strength = AUNumber(AUKeyDepthStrength, 1.0);
+// Each layer slides by its depth; the subject, nearest, most. Down the screen is +y in both UIKit and the layers.
+- (void)moveSurfaces {
+    CGFloat strength = kStrength * AUNumber(AUKeyDepthStrength, 1.0);
+    BOOL moving = _shownDepth;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    UIView *cover = _cover;
-    if (cover && _coverSurface.attached) {
-        // At the cover's foot, a little bigger than the cover and nearer than anything on it: it moves most with
-        // the tilt, takes the cover's paused shrink and fades with it.
-        CGSize size = cover.bounds.size;
-        CGFloat shift = 0.045 * 0.55 * strength;
-        CGPoint offset = CGPointMake(_tiltNow.x * shift * size.width, _tiltNow.y * shift * size.height);
-        CALayer *subject = _coverSurface.subject;
-        subject.bounds = (CGRect){CGPointZero, size};
-        subject.position = cover.center;
-        CGAffineTransform own = CGAffineTransformConcat(CGAffineTransformMakeScale(kStepOut, kStepOut),
-                                                        CGAffineTransformMakeTranslation(offset.x, offset.y + size.height / 2 * (1 - kStepOut)));
-        subject.affineTransform = CGAffineTransformConcat(own, cover.transform);
-        subject.opacity = (_shownSubject && _plane.alpha > 0.01) ? (float)(cover.alpha * _plane.alpha) : 0;
-    }
-    CALayer *fill = _fillLayer;
-    if (fill && _fillSurface.attached) {
-        CALayer *subject = _fillSurface.subject;
-        CGSize size = fill.bounds.size;
-        CGFloat shift = 0.045 * 0.55 * strength * MAX(size.width, size.height);
-        subject.frame = fill.frame;
-        subject.affineTransform = CGAffineTransformMakeTranslation(_tiltNow.x * shift, _tiltNow.y * shift);
-        subject.opacity = (_shownSubject && _fillSurface.renderer.layer.opacity > 0.01) ? fill.opacity : 0;
+    for (AUSurface *surface in [self attachedSurfaces]) {
+        CGFloat side = surface.pictureRect.size.width;
+        for (int k = 0; k < 3; k++) {
+            CGFloat amount = moving ? strength * side * (AUDepthLayerDepths[k] - 0.5) : 0;
+            surface.planes[k].affineTransform = CGAffineTransformMakeTranslation(_tiltNow.x * amount, _tiltNow.y * amount);
+        }
+        CGFloat amount = (moving || _shownSubject) ? strength * side * (AUSubjectDepth - 0.5) : 0;
+        CGPoint offset = CGPointMake(_tiltNow.x * amount, _tiltNow.y * amount);
+        if (surface.kind == AUSurfaceCover) {
+            UIView *cover = _cover;
+            if (!cover) continue;
+            // At the cover's foot, a little bigger than the picture: it steps out of the frame and fades with the cover.
+            CGRect picture = [_plane.layer convertRect:surface.pictureRect fromLayer:surface.stage];
+            CGPoint center = [_tilt convertPoint:CGPointMake(CGRectGetMidX(picture), CGRectGetMidY(picture)) fromView:_plane];
+            CALayer *subject = surface.subject;
+            subject.bounds = (CGRect){CGPointZero, picture.size};
+            subject.position = center;
+            CGAffineTransform own = CGAffineTransformConcat(CGAffineTransformMakeScale(kStepOut, kStepOut),
+                CGAffineTransformMakeTranslation(offset.x, offset.y + picture.size.height / 2 * (1 - kStepOut)));
+            subject.affineTransform = CGAffineTransformConcat(own, cover.transform);
+            subject.opacity = (_shownSubject && _plane.alpha > 0.01) ? (float)(cover.alpha * _plane.alpha) : 0;
+        } else {
+            // The same rectangle as the picture's, in the clip (which sits where the fill does).
+            CALayer *subject = surface.subject;
+            subject.bounds = (CGRect){CGPointZero, surface.pictureRect.size};
+            subject.position = CGPointMake(CGRectGetMidX(surface.pictureRect), CGRectGetMidY(surface.pictureRect));
+            subject.affineTransform = CGAffineTransformMakeTranslation(offset.x, offset.y);
+            subject.opacity = _shownSubject ? 1 : 0;
+            surface.subjectClip.opacity = surface.stage.opacity * (_fillLayer ? _fillLayer.opacity : 1);
+        }
     }
     [CATransaction commit];
 }
@@ -414,8 +474,13 @@ static UIView *taurusField(void) {
     [self apply:note.object animated:YES];
 }
 
-// The track moved on: what showed belongs to the last one and goes at once, before Taurus has the new picture,
-// so the old cover is never laid over the new one.
+- (void)refresh {
+    _shownKey = nil;
+    _layers = nil;
+    [self apply:[AUPipeline shared].current animated:YES];
+}
+
+// The track moved on: what showed belongs to the last one and goes at once, before Taurus has the new picture.
 - (void)trackChanged:(NSNotification *)note {
     NSString *uri = note.userInfo[@"uri"];
     if ([_shown.trackURI isEqualToString:uri]) return;
@@ -423,17 +488,6 @@ static UIView *taurusField(void) {
     _shownDepth = _shownSubject = _wantPlane = NO;
     [self setShown:NO animated:NO];
     [self updateMotion];
-}
-
-// An artwork published for another track than the one playing is not shown.
-static BOOL forCurrentTrack(AUArtwork *artwork) {
-    NSString *playing = AUTaurusTrackURI();
-    return !playing.length || !artwork.trackURI.length || [artwork.trackURI isEqualToString:playing];
-}
-
-- (void)refresh {
-    _shownKey = nil;
-    [self apply:[AUPipeline shared].current animated:YES];
 }
 
 - (NSArray<AUSurface *> *)attachedSurfaces {
@@ -450,20 +504,19 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
         else fade();
     }
     if (_fillSurface.attached) {
-        CALayer *layer = _fillSurface.renderer.layer;
+        CALayer *stage = _fillSurface.stage;
         float target = shown ? 1 : 0;
-        if (animated && layer.opacity != target) {
+        if (animated && stage.opacity != target) {
             CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
-            fade.fromValue = @(layer.presentationLayer.opacity);
+            fade.fromValue = @(stage.presentationLayer.opacity);
             fade.toValue = @(target);
             fade.duration = 0.22;
-            [layer addAnimation:fade forKey:@"aura.fade"];
-            CABasicAnimation *subjectFade = [fade copy];
-            [_fillSurface.subject addAnimation:subjectFade forKey:@"aura.fade"];
+            [stage addAnimation:fade forKey:@"aura.fade"];
+            [_fillSurface.subjectClip addAnimation:[fade copy] forKey:@"aura.fade"];
         }
-        layer.opacity = target;
+        stage.opacity = target;
     }
-    [self placeSubjects];
+    [self moveSurfaces];
 }
 
 - (void)apply:(AUArtwork *)artwork animated:(BOOL)animated {
@@ -476,12 +529,10 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
     BOOL wantPlane = (depth || subject || upscaled) && artwork.source && forCurrentTrack(artwork);
     BOOL sameCover = [artwork.key isEqualToString:_shownKey];
     if (!sameCover) {
-        // A new track: what showed goes at once; Spotify's own cover underneath shows until the new effects land.
         _shownDepth = _shownSubject = NO;
         _wantPlane = NO;
         [self setShown:NO animated:NO];
     }
-    // A subject still being looked for is waited for a moment, so the picture does not jump from sharp to blurred.
     BOOL subjectPending = [self wantsSubject] && !artwork.cutout && !artwork.noSubject;
     CFTimeInterval waited = CACurrentMediaTime() - artwork.arrived;
     if (wantPlane && subjectPending && waited < kSubjectWait && !_shownDepth) {
@@ -495,55 +546,77 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
         _shownKey = artwork.key;
         return;
     }
-    CGFloat strength = AUNumber(AUKeyDepthStrength, 1.0);
-    for (AUSurface *surface in surfaces) {
-        if (!wantPlane) continue;
-        if (surface.contentArtwork != artwork || surface.contentDepth != depth || surface.contentSubject != subject) {
-            UIImage *color = subject ? artwork.background : artwork.source;
-            UIImage *depthMap = subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth;
-            [surface.renderer setColor:color.CGImage depth:depth ? depthMap.CGImage : NULL];
-            surface.subject.contents = subject ? (__bridge id)artwork.cutout.CGImage : nil;
-            surface.contentArtwork = artwork;
-            surface.contentDepth = depth;
-            surface.contentSubject = subject;
-        }
-        surface.renderer.strength = depth ? 0.045 * strength : 0;
-        surface.renderer.zoom = depth ? 1.03 + 0.03 * strength : 1.0;
-        surface.renderer.tilt = _tiltNow;
-        [surface.renderer render];
+    _shown = artwork;
+    _shownKey = artwork.key;
+    if (!wantPlane) {
+        _wantPlane = NO;
+        [self setShown:NO animated:animated];
+        [self updateMotion];
+        return;
     }
-    if (wantPlane && (!_wantPlane || depth != _shownDepth || subject != _shownSubject)) {
+    // The layers are cut off the main queue; until they are, what showed stays (or nothing, for a new cover).
+    AUShownLayers *layers = _layers;
+    if (layers.artwork != artwork || layers.depth != depth || layers.subject != subject) {
+        if (_building) return;
+        _building = YES;
+        UIImage *color = subject ? artwork.background : artwork.source;
+        UIImage *map = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth) : nil;
+        __weak AUArtwork *weakArtwork = artwork;
+        double started = AUNowMs();
+        dispatch_async(_work, ^{
+            AUDepthLayers made = AUDepthLayersMake(color.CGImage, map.CGImage);
+            AUShownLayers *built = [AUShownLayers new];
+            built.depth = depth;
+            built.subject = subject;
+            built.far = (__bridge id)made.far;
+            built.middle = (__bridge id)made.middle;
+            built.near = (__bridge id)made.near;
+            AUDepthLayersRelease(&made);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self->_building = NO;
+                AUArtwork *still = weakArtwork;
+                built.artwork = still;
+                AUStatRecord(@"layers", AUNowMs() - started);
+                if (still && still == [AUPipeline shared].current) self->_layers = built;
+                // Whatever is current now: a cover that came while these were cut is not left waiting.
+                [self apply:[AUPipeline shared].current animated:YES];
+            });
+        });
+        return;
+    }
+    BOOL changed = NO;
+    for (AUSurface *surface in surfaces) {
+        if (surface.content == layers) continue;
+        changed = YES;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        surface.planes[0].contents = layers.far;
+        surface.planes[1].contents = layers.middle;
+        surface.planes[2].contents = layers.near;
+        surface.subject.contents = subject ? (__bridge id)artwork.cutout.CGImage : nil;
+        [CATransaction commit];
+        surface.content = layers;
+    }
+    BOOL first = !_wantPlane;
+    _shownDepth = depth;
+    _shownSubject = subject;
+    _wantPlane = YES;
+    if (changed) {
+        if (_coverSurface.attached) [self placeSurface:_coverSurface stageBounds:_plane.bounds];
+        if (_fillSurface.attached && _fillLayer) [self placeSurface:_fillSurface stageBounds:_fillLayer.bounds];
+    }
+    if (first) {
         double latency = waited * 1000;
+        AUStatRecord(@"shown", latency);
         static NSUInteger logged;
         if (logged++ < 60) {
             AULog(@"artwork …%@ shown %.0f ms after it came: depth %d, subject %d, upscaled %d, on %@",
                   [artwork.key substringFromIndex:artwork.key.length > 10 ? artwork.key.length - 10 : 0], latency, depth, subject,
                   upscaled, _fillSurface.attached ? @"Fill" : @"the cover");
         }
-        if (!_wantPlane) AUStatRecord(@"shown", latency);
     }
-    if (!wantPlane && artwork.source) {
-        static NSUInteger quiet;
-        if (quiet++ < 20) AULog(@"artwork shown plain: depth %@, subject %@", artwork.depth ? @"ready" : @"none yet",
-                                artwork.cutout ? @"ready" : (artwork.noSubject ? @"none on it" : @"none yet"));
-    }
-    _shown = artwork;
-    _shownKey = artwork.key;
-    _shownDepth = depth;
-    _shownSubject = subject;
-    _wantPlane = wantPlane;
-    [self setShown:wantPlane animated:animated];
+    [self setShown:YES animated:animated];
     [self updateMotion];
-}
-
-- (void)memoryWarning {
-    if (_link) return;
-    for (AUSurface *surface in @[_coverSurface ?: (id)NSNull.null, _fillSurface ?: (id)NSNull.null]) {
-        if (![surface isKindOfClass:AUSurface.class] || surface.attached) continue;
-        [surface.renderer setColor:NULL depth:NULL];
-        surface.subject.contents = nil;
-        surface.contentArtwork = nil;
-    }
 }
 
 #pragma mark - motion and frames
@@ -557,8 +630,8 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
 }
 
 // While the artwork can move, Core Motion runs on its own queue at 20 Hz to notice the phone moving; only then a
-// display link runs, at up to 120 Hz, until the phone has been still for 0.8 s. A link capped low would drag
-// Spotify's own 120 Hz animations down with it, so there is none at rest.
+// display link runs, at up to 120 Hz, until the phone has been still for 0.8 s. The layers only move: Core
+// Animation draws them, nothing is rendered per frame.
 - (void)updateMotion {
     BOOL run = [self needsMotion];
     if (run && !_motionOn && _motion.deviceMotionAvailable) {
@@ -577,7 +650,6 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
             lastY = gy;
             if (moved) dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf startLink]; });
         }];
-        AULog(@"motion on (%@)", _fillSurface.attached ? @"Fill" : @"cover");
         [self startLink];
     } else if (!run && _motionOn) {
         _motionOn = NO;
@@ -609,7 +681,6 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
         return;
     }
     CFTimeInterval now = CACurrentMediaTime();
-    // A cover being swiped to the next track: the effects step aside until it settles.
     if (_coverSurface.attached) {
         UIScrollView *list = listOf(_tilt);
         BOOL scrolling = list.isDragging || list.isDecelerating;
@@ -628,7 +699,6 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
             _refY = gy;
             _refSet = YES;
         }
-        // The rest position follows the hand over a few seconds: any way the phone is held is the middle.
         double dt = MIN(0.1, MAX(1.0 / 120, link.targetTimestamp - link.timestamp));
         double follow = 1 - exp(-dt / 3.0);
         _refX += (gx - _refX) * follow;
@@ -641,13 +711,8 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
         if (moved > 0.0015) _lastMove = now;
         if (moved > 0.0003) {
             _tiltNow = next;
-            [self placeSubjects];
-            if (_shownDepth) {
-                for (AUSurface *surface in [self attachedSurfaces]) {
-                    surface.renderer.tilt = _tiltNow;
-                    [surface.renderer render];
-                }
-            }
+            [self moveSurfaces];
+            AUCountFrame();
             if (++_frames % 600 == 1) AULog(@"parallax running: tilt %.2f %.2f", _tiltNow.x, _tiltNow.y);
         }
     }

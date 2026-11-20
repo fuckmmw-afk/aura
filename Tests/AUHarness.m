@@ -7,8 +7,8 @@
 #import "Features/AUImage.h"
 #import "Features/AUPalette.h"
 #import "Features/AUVision.h"
-#import "UI/AUParallaxRenderer.h"
 #import "UI/AULockScreen.h"
+#import "Features/AUDepthLayers.h"
 #import <AVFoundation/AVFoundation.h>
 
 static NSString *outDir;
@@ -99,23 +99,22 @@ int main(int argc, const char *argv[]) {
                     failures++;
                 }
             }
-            AUParallaxRenderer *renderer = [AUParallaxRenderer new];
             CGImageRef soft = depth ? AUSoftenedDepth(depth) : NULL;
-            [renderer setColor:cut.background ?: cover depth:cut.background && soft ? soft : depth];
-            renderer.zoom = 1.06;
-            renderer.strength = 0.045;
-            CGPoint tilts[3] = {{-1, 0}, {0, 0}, {1, 0.6}};
-            for (int i = 0; i < 3; i++) {
-                renderer.tilt = tilts[i];
-                CGImageRef frame = [renderer renderImageWidth:600 height:600];
-                CGImageRef shot = frame ? composite(frame, cut.cutout, tilts[i], 600) : NULL;
-                save(shot, [NSString stringWithFormat:@"%@-4-cover-tilt%d.png", name, i]);
-                if (frame) CGImageRelease(frame);
-                if (shot) CGImageRelease(shot);
-                // Fill: the same picture aspect-filled into the top of a 402 x 874 screen (62.5%: 402 x 546).
-                CGImageRef fill = [renderer renderImageWidth:402 height:546];
-                save(fill, [NSString stringWithFormat:@"%@-5-fill-tilt%d.png", name, i]);
-                if (fill) CGImageRelease(fill);
+            // The app's look, as the lock screen's clip draws the same layers: the cover square and Fill's 402 x 546.
+            {
+                AULockClipInput input = {cut.background ?: cover, cut.background && soft ? soft : depth, cut.cutout};
+                for (int i = 0; i < 2; i++) {
+                    CGImageRef square = AULockClipFrame(input, CGSizeMake(600, 600), i * 0.25, YES);
+                    save(square, [NSString stringWithFormat:@"%@-4-cover-%d.png", name, i]);
+                    if (square) CGImageRelease(square);
+                    CGImageRef fill = AULockClipFrame(input, CGSizeMake(402, 546), i * 0.25, YES);
+                    save(fill, [NSString stringWithFormat:@"%@-5-fill-%d.png", name, i]);
+                    if (fill) CGImageRelease(fill);
+                }
+                double tl = AUNowMs();
+                AUDepthLayers layers = AUDepthLayersMake(input.color, input.depth);
+                printf("  depth layers %.1f ms\n", AUNowMs() - tl);
+                AUDepthLayersRelease(&layers);
             }
             // The lock screen's 3D flight: a 6 s loop, 3:4, as the phone would write it.
             {
@@ -135,14 +134,6 @@ int main(int argc, const char *argv[]) {
                        CMTimeGetSeconds(asset.duration), track.naturalSize.width, track.naturalSize.height);
                 if (!written || fabs(CMTimeGetSeconds(asset.duration) - 6) > 0.1 || track.naturalSize.width != 896) failures++;
             }
-            t = AUNowMs();
-            [renderer setColor:cover depth:depth];
-            renderer.tilt = CGPointMake(1, 0);
-            for (int i = 0; i < 20; i++) {
-                CGImageRef frame = [renderer renderImageWidth:1062 height:1062];
-                if (frame) CGImageRelease(frame);
-            }
-            printf("  render 1062 px: %.1f ms a frame (incl. readback)\n", (AUNowMs() - t) / 20);
             CGImageRef small = AUImageResized(cover, 300, 300);
             t = AUNowMs();
             CGImageRef up = AUUpscaled(small, 1024, &error);
