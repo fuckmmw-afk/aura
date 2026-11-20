@@ -481,7 +481,8 @@ static UIView *taurusField(void) {
         if (!wantPlane) continue;
         if (surface.contentArtwork != artwork || surface.contentDepth != depth || surface.contentSubject != subject) {
             UIImage *color = subject ? artwork.background : artwork.source;
-            [surface.renderer setColor:color.CGImage depth:depth ? artwork.depth.CGImage : NULL];
+            UIImage *depthMap = subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth;
+            [surface.renderer setColor:color.CGImage depth:depth ? depthMap.CGImage : NULL];
             surface.subject.contents = subject ? (__bridge id)artwork.cutout.CGImage : nil;
             surface.contentArtwork = artwork;
             surface.contentDepth = depth;

@@ -115,6 +115,20 @@ CGImageRef AUDepthMap(CGImageRef image, NSString **error) {
     return map;
 }
 
+CGImageRef AUSoftenedDepth(CGImageRef depth) {
+    NSData *bytes = AUGrayBytes(depth);
+    if (!bytes) return NULL;
+    size_t w = CGImageGetWidth(depth), h = CGImageGetHeight(depth);
+    NSMutableData *a = [bytes mutableCopy], *b = [NSMutableData dataWithLength:w * h];
+    vImage_Buffer src = {a.mutableBytes, h, w, w}, dst = {b.mutableBytes, h, w, w};
+    uint32_t side = (uint32_t)(MAX(w, h) / 10) | 1;
+    for (int pass = 0; pass < 2; pass++) {
+        vImageTentConvolve_Planar8(&src, &dst, NULL, 0, 0, side, side, 0, kvImageEdgeExtend);
+        vImageTentConvolve_Planar8(&dst, &src, NULL, 0, 0, side, side, 0, kvImageEdgeExtend);
+    }
+    return AUGrayImage(a.bytes, w, h);
+}
+
 #pragma mark - cutout
 
 // The cover with the subject's room filled from what is around it and softened, by normalized convolution at 256 px:

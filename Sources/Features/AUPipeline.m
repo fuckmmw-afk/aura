@@ -245,8 +245,14 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
         }
         if (depth) {
             UIImage *depthImage = [UIImage imageWithCGImage:depth];
+            CGImageRef soft = AUSoftenedDepth(depth);
+            UIImage *softImage = soft ? [UIImage imageWithCGImage:soft] : depthImage;
+            if (soft) CGImageRelease(soft);
             CGImageRelease(depth);
-            [self deliver:artwork generation:generation apply:^{ artwork.depth = depthImage; }];
+            [self deliver:artwork generation:generation apply:^{
+                artwork.depth = depthImage;
+                artwork.softDepth = softImage;
+            }];
         }
     }
 

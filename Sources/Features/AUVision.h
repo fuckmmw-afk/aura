@@ -8,6 +8,10 @@ NS_ASSUME_NONNULL_BEGIN
 // softened a little, at the model's 518 x 392. nil when the model is not on the phone yet (it is being fetched).
 CGImageRef _Nullable AUDepthMap(CGImageRef image, NSString *_Nullable *_Nullable error) CF_RETURNS_RETAINED;
 
+// The depth map heavily softened: for a background whose subject was lifted out, so its parallax warps smoothly
+// instead of tearing where the subject's outline was.
+CGImageRef _Nullable AUSoftenedDepth(CGImageRef depth) CF_RETURNS_RETAINED;
+
 typedef struct {
     CGImageRef _Nullable cutout;       // the subject alone, RGBA, the cover's size
     CGImageRef _Nullable background;   // the cover blurred, the subject's room dimmed a touch

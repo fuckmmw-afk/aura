@@ -13,6 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL upscaled;
 @property (nonatomic) BOOL upscaleChecked;                    // upscaling was on when the source was made
 @property (nonatomic, strong, nullable) UIImage *depth;       // gray, near bright
+@property (nonatomic, strong, nullable) UIImage *softDepth;   // the same softened, under a lifted subject
 @property (nonatomic, strong, nullable) UIImage *cutout;      // the subject, RGBA, the source's size
 @property (nonatomic, strong, nullable) UIImage *background;  // the cover blurred, under the subject
 @property (nonatomic) CGRect subjectBounds;                   // 0...1, origin top left

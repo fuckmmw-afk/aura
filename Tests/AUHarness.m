@@ -98,7 +98,8 @@ int main(int argc, const char *argv[]) {
                 }
             }
             AUParallaxRenderer *renderer = [AUParallaxRenderer new];
-            [renderer setColor:cut.background ?: cover depth:depth];
+            CGImageRef soft = depth ? AUSoftenedDepth(depth) : NULL;
+            [renderer setColor:cut.background ?: cover depth:cut.background && soft ? soft : depth];
             renderer.zoom = 1.06;
             renderer.strength = 0.045;
             CGPoint tilts[3] = {{-1, 0}, {0, 0}, {1, 0.6}};
@@ -130,6 +131,7 @@ int main(int argc, const char *argv[]) {
             save(small, [name stringByAppendingString:@"-6-small300.png"]);
             save(up, [name stringByAppendingString:@"-7-upscaled.png"]);
             AUCutoutResultRelease(&cut);
+            if (soft) CGImageRelease(soft);
             if (depth) CGImageRelease(depth);
             if (up) CGImageRelease(up);
             CGImageRelease(small);
