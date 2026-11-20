@@ -102,7 +102,7 @@ static _Atomic uint64_t sg_peak;
 static _Atomic uint32_t sg_frames;
 
 BOOL AUThrottled(void) {
-    return NSProcessInfo.processInfo.thermalState >= NSProcessInfoThermalStateSerious;
+    return AUFlag(AUKeyThermalPause) && NSProcessInfo.processInfo.thermalState >= NSProcessInfoThermalStateSerious;
 }
 
 NSString *AUThermalName(void) {

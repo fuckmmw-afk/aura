@@ -90,6 +90,12 @@ UIViewController *AUSettingsPage(void) {
     ADD(stats, AURowStat(@"Загрузка модели глубины", ^NSString *{ return AUStatText(@"load." AUModelDepth); }));
     ADD(stats, AURowStat(@"Память Spotify", ^NSString *{ return [NSString stringWithFormat:@"%@ (пик %@)", AUBytes(AUFootprint()), AUBytes(AUPeakFootprint())]; }));
     ADD(stats, AURowStat(@"Температура", ^NSString *{ return AUThermalName(); }));
+    SGModRow *thermal = AURowOption(@"Пауза при перегреве", @"При «горячем» телефоне оставлять только палитру", AUKeyThermalPause);
+    thermal.changed = ^(BOOL on) {
+        [NSNotificationCenter.defaultCenter postNotificationName:AUThrottleDidChangeNotification object:nil];
+        AUSettingsChanged();
+    };
+    ADD(stats, thermal);
     ADD(stats, AURowAction(@"Поделиться логом", @"Documents/Aura/aura.log, в нём строка телеметрии раз в минуту", ^{ AUShareFile(AULogURL()); }));
     ADD(sections, AUSection(@"Диагностика", stats, nil));
 

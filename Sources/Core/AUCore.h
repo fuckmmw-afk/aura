@@ -41,7 +41,9 @@ void AUSettingsChanged(void);
 #pragma mark - system
 
 void AUSystemStart(void);
-// The thermal state is serious or critical: no parallax, no background work but the palette.
+// Only when "Пауза при перегреве" is on (off by default) and the thermal state is serious or critical: then no
+// parallax and no background work but the palette.
+#define AUKeyThermalPause @"aura.thermalPause"
 BOOL AUThrottled(void);
 extern NSNotificationName const AUThrottleDidChangeNotification;
 uint64_t AUFootprint(void);       // the process's physical footprint, bytes
