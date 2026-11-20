@@ -201,28 +201,10 @@ AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error)
             if (error) *error = @"no subject";
             return result;
         }
-        CVPixelBufferRef mask = [observation generateScaledMaskForImageForInstances:observation.allInstances fromRequestHandler:handler error:&e];
-        if (!mask) {
-            if (error) *error = e.localizedDescription ?: @"no mask";
-            return result;
-        }
-        size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image);
-        size_t mw = CVPixelBufferGetWidth(mask), mh = CVPixelBufferGetHeight(mask);
-        uint8_t *alpha = malloc(mw * mh);
-        CVPixelBufferLockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
-        vImage_Buffer src = {CVPixelBufferGetBaseAddress(mask), mh, mw, CVPixelBufferGetBytesPerRow(mask)};
-        vImage_Buffer dst = {alpha, mh, mw, mw};
-        BOOL converted = CVPixelBufferGetPixelFormatType(mask) == kCVPixelFormatType_OneComponent32Float
-            && vImageConvert_PlanarFtoPlanar8(&src, &dst, 1, 0, 0) == kvImageNoError;
-        CVPixelBufferUnlockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
-        CVPixelBufferRelease(mask);
-        if (!converted) {
-            free(alpha);
-            if (error) *error = @"mask format";
-            return result;
-        }
-        // Vision is unsure of drawn people (a cover's illustration): its mask can sit at a half, which drew the
-        // subject see-through. A smoothstep from 0.25 to 0.6 makes the sure parts solid and drops the faint specks.
+        // Each subject on its own: Vision is unsure of drawn people (a cover's illustration) and can give one a mask
+        // that peaks at a third while a photographed one beside it is solid. Each instance's mask is read against its
+        // own peak, then a smoothstep from 0.25 to 0.6 makes the sure parts solid and drops the faint fringe; the
+        // instances are joined by their maximum. An instance that never passes 0.15 is noise and left out.
         static uint8_t curve[256];
         static dispatch_once_t once;
         dispatch_once(&once, ^{
@@ -231,8 +213,46 @@ AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error)
                 curve[i] = (uint8_t)lroundf(x * x * (3 - 2 * x) * 255);
             }
         });
-        vImage_Buffer hard = {alpha, mh, mw, mw};
-        vImageTableLookUp_Planar8(&hard, &hard, curve, 0);
+        size_t mw = 0, mh = 0;
+        uint8_t *alpha = NULL, *one = NULL;
+        NSUInteger kept = 0, seen = 0;
+        NSIndexSet *instances = observation.allInstances;
+        for (NSUInteger index = instances.firstIndex; index != NSNotFound && seen < 8; index = [instances indexGreaterThanIndex:index], seen++) {
+            CVPixelBufferRef mask = [observation generateScaledMaskForImageForInstances:[NSIndexSet indexSetWithIndex:index]
+                                                                     fromRequestHandler:handler error:&e];
+            if (!mask) continue;
+            if (!alpha) {
+                mw = CVPixelBufferGetWidth(mask);
+                mh = CVPixelBufferGetHeight(mask);
+                alpha = calloc(mw * mh, 1);
+                one = malloc(mw * mh);
+            }
+            BOOL fits = CVPixelBufferGetWidth(mask) == mw && CVPixelBufferGetHeight(mask) == mh
+                && CVPixelBufferGetPixelFormatType(mask) == kCVPixelFormatType_OneComponent32Float;
+            CVPixelBufferLockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
+            vImage_Buffer src = {CVPixelBufferGetBaseAddress(mask), mh, mw, CVPixelBufferGetBytesPerRow(mask)};
+            vImage_Buffer dst = {one, mh, mw, mw};
+            BOOL converted = fits && vImageConvert_PlanarFtoPlanar8(&src, &dst, 1, 0, 0) == kvImageNoError;
+            CVPixelBufferUnlockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
+            CVPixelBufferRelease(mask);
+            if (!converted) continue;
+            uint8_t peak = 0;
+            for (size_t i = 0; i < mw * mh; i++) if (one[i] > peak) peak = one[i];
+            if (peak < 38) continue;
+            float scale = 255.0f / peak;
+            for (size_t i = 0; i < mw * mh; i++) {
+                uint8_t v = curve[(uint8_t)fminf(255, one[i] * scale)];
+                if (v > alpha[i]) alpha[i] = v;
+            }
+            kept++;
+        }
+        free(one);
+        if (!alpha || !kept) {
+            free(alpha);
+            if (error) *error = e.localizedDescription ?: @"no mask";
+            return result;
+        }
+        size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image);
         // Coverage and the subject's box, rows top first.
         size_t minX = mw, minY = mh, maxX = 0, maxY = 0;
         double sum = 0;
