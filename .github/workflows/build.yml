@@ -49,11 +49,16 @@ jobs:
           otool -l .theos/obj/Aura.dylib | grep -A2 LC_ID_DYLIB | grep -q /Library/MobileSubstrate/DynamicLibraries/Aura.dylib
           ls -la .theos/obj/Aura.dylib
 
+      # coremltools ships its native parts (the model runner) only for released Pythons.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Models on Core ML (download, checksum, compile, run)
         env:
           AURA_MODELS_URL: ${{ secrets.AURA_MODELS_URL }}
         run: |
-          python3 -m venv "$RUNNER_TEMP/venv"
+          python -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" -q install coremltools numpy pillow
           "$RUNNER_TEMP/venv/bin/python" scripts/check_models.py "$AURA_MODELS_URL"
 
