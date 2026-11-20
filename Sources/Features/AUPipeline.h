@@ -8,6 +8,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface AUArtwork : NSObject
 @property (nonatomic, copy, readonly) NSString *key;
 @property (nonatomic, readonly) BOOL exact;
+@property (nonatomic, copy, nullable) NSString *trackURI;     // the track it was published for (an album's songs share an artwork)
 @property (nonatomic, strong, nullable) AUPalette *palette;
 @property (nonatomic, strong, nullable) UIImage *source;      // the cover as drawn: upscaled when it was small
 @property (nonatomic) BOOL upscaled;

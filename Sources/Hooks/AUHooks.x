@@ -78,6 +78,7 @@ static void start(void) {
         return;
     }
     AUSystemStart();
+    AUTaurusFollowTrack();
     [AUPipeline.shared start];
     if (NSClassFromString(@"_TtC35CreativeWorkCommons_CoverArtTiltKit16CoverArtTiltView")) {
         %init(Player);

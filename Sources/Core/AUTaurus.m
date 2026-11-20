@@ -150,3 +150,54 @@ SGModSection *AUSection(NSString *title, NSArray<SGModRow *> *rows, NSString *fo
     SGModSection *(*f)(NSString *, NSArray *) = (SGModSection * (*)(NSString *, NSArray *)) sym("SGSection");
     return f ? f(title, kept) : nil;
 }
+
+#pragma mark - the player
+
+NSNotificationName const AUTrackDidChangeNotification = @"AUTrackDidChangeNotification";
+
+static id playerTrack(void) {
+    id (*state)(void) = (id (*)(void))sym("SGPlayerState");
+    id player = state ? state() : nil;
+    return [player respondsToSelector:NSSelectorFromString(@"track")] ? [player valueForKey:@"track"] : nil;
+}
+
+NSString *AUTaurusTrackURI(void) {
+    id track = playerTrack();
+    id uri = [track respondsToSelector:NSSelectorFromString(@"URI")] ? [track valueForKey:@"URI"] : nil;
+    NSString *(*string)(id) = (NSString * (*)(id)) sym("SGURIString");
+    if (string) return string(uri);
+    if ([uri isKindOfClass:NSURL.class]) return [uri absoluteString];
+    return [uri isKindOfClass:NSString.class] ? uri : nil;
+}
+
+NSString *AUTaurusTrackTitle(void) {
+    id track = playerTrack();
+    id title = [track respondsToSelector:NSSelectorFromString(@"trackTitle")] ? [track valueForKey:@"trackTitle"] : nil;
+    return [title isKindOfClass:NSString.class] ? title : nil;
+}
+
+@interface AUTrackFollower : NSObject
+@property (nonatomic, copy) NSString *uri;
+@end
+
+@implementation AUTrackFollower
+- (void)playerStateDidChange:(id)state {
+    NSString *uri = AUTaurusTrackURI();
+    if (!uri.length || [uri isEqualToString:self.uri]) return;
+    self.uri = uri;
+    [NSNotificationCenter.defaultCenter postNotificationName:AUTrackDidChangeNotification object:nil userInfo:@{@"uri": uri}];
+}
+@end
+
+void AUTaurusFollowTrack(void) {
+    static AUTrackFollower *follower;
+    if (follower) return;
+    void (*add)(id) = (void (*)(id))sym("SGAddPlayerStateObserver");
+    if (!add) {
+        AULog(@"Taurus has no player state observers: track changes are read from the artwork only");
+        return;
+    }
+    follower = [AUTrackFollower new];
+    follower.uri = AUTaurusTrackURI();
+    add(follower);
+}

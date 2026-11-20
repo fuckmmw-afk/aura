@@ -25,7 +25,7 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
     NSCache<NSString *, AUArtwork *> *_memory;
     NSUInteger _generation;     // the artwork being worked on; a stage of an older one stops
     UIImage *_pendingImage;
-    NSString *_pendingKey;
+    NSString *_pendingKey, *_pendingURI;
     BOOL _pendingExact;
     BOOL _scheduled;
 }
@@ -64,12 +64,20 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
 #pragma mark - following the player
 
 - (void)artworkChanged:(NSNotification *)note {
-    NSString *key = nil;
+    NSString *key = nil, *uri = nil;
     BOOL exact = NO;
-    UIImage *image = AUTaurusArtwork(NULL, &key, &exact);
+    UIImage *image = AUTaurusArtwork(&uri, &key, &exact);
     if (!image.CGImage || !key.length) return;
-    // A screen's copy of the same picture after the exact one adds nothing.
-    if ([key isEqualToString:_current.key] && (_current.exact || !exact)) return;
+    // A screen's copy of the same picture after the exact one adds nothing but, for the next song of the same
+    // album, the track it now stands for.
+    if ([key isEqualToString:_current.key] && (_current.exact || !exact)) {
+        if (uri.length && ![uri isEqualToString:_current.trackURI]) {
+            _current.trackURI = uri;
+            [self post:_current];
+        }
+        return;
+    }
+    _pendingURI = uri;
     _pendingImage = image;
     _pendingKey = key;
     _pendingExact = exact;
@@ -91,6 +99,7 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
     AUArtwork *artwork = [_memory objectForKey:key];
     if (!artwork || (exact && !artwork.exact)) artwork = [[AUArtwork alloc] initWithKey:key exact:exact];
     artwork.arrived = CACurrentMediaTime();
+    artwork.trackURI = _pendingURI;
     _current = artwork;
     [self post:artwork];
     [self work:artwork image:image];

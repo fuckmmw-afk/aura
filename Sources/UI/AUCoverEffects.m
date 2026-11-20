@@ -1,6 +1,7 @@
 #import "AUCoverEffects.h"
 #import "AUParallaxRenderer.h"
 #import "Core/AUCore.h"
+#import "Core/AUTaurus.h"
 #import "Features/AUPipeline.h"
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
@@ -115,6 +116,7 @@ static CALayer *ivarLayer(id object, const char *name) {
     [center addObserver:self selector:@selector(becameActive) name:UIApplicationDidBecomeActiveNotification object:nil];
     [center addObserver:self selector:@selector(resignedActive) name:UIApplicationWillResignActiveNotification object:nil];
     [center addObserver:self selector:@selector(memoryWarning) name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
+    [center addObserver:self selector:@selector(trackChanged:) name:AUTrackDidChangeNotification object:nil];
     if (![AUParallaxRenderer supported]) AULog(@"cover effects: no Metal device");
     return self;
 }
@@ -412,6 +414,23 @@ static UIView *taurusField(void) {
     [self apply:note.object animated:YES];
 }
 
+// The track moved on: what showed belongs to the last one and goes at once, before Taurus has the new picture,
+// so the old cover is never laid over the new one.
+- (void)trackChanged:(NSNotification *)note {
+    NSString *uri = note.userInfo[@"uri"];
+    if ([_shown.trackURI isEqualToString:uri]) return;
+    _shownKey = nil;
+    _shownDepth = _shownSubject = _wantPlane = NO;
+    [self setShown:NO animated:NO];
+    [self updateMotion];
+}
+
+// An artwork published for another track than the one playing is not shown.
+static BOOL forCurrentTrack(AUArtwork *artwork) {
+    NSString *playing = AUTaurusTrackURI();
+    return !playing.length || !artwork.trackURI.length || [artwork.trackURI isEqualToString:playing];
+}
+
 - (void)refresh {
     _shownKey = nil;
     [self apply:[AUPipeline shared].current animated:YES];
@@ -454,7 +473,7 @@ static UIView *taurusField(void) {
     BOOL depth = [self wantsDepth] && artwork.depth;
     BOOL subject = [self wantsSubject] && artwork.cutout && artwork.background;
     BOOL upscaled = artwork.upscaled && AUEnabled(AUKeyUpscale);
-    BOOL wantPlane = (depth || subject || upscaled) && artwork.source;
+    BOOL wantPlane = (depth || subject || upscaled) && artwork.source && forCurrentTrack(artwork);
     BOOL sameCover = [artwork.key isEqualToString:_shownKey];
     if (!sameCover) {
         // A new track: what showed goes at once; Spotify's own cover underneath shows until the new effects land.

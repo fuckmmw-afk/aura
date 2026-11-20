@@ -20,6 +20,15 @@ void AUTaurusSetCoverAccent(UIColor *color);
 void AUTaurusSetSwitch(NSString *key, BOOL on);
 void AUTaurusRestart(void);
 
+#pragma mark - the player
+
+// The track playing now, from Taurus's player state: its URI ("spotify:track:…") and title. nil before it reports.
+NSString *_Nullable AUTaurusTrackURI(void);
+NSString *_Nullable AUTaurusTrackTitle(void);
+// Posted on the main queue when the playing track's URI changes; userInfo "uri".
+extern NSNotificationName const AUTrackDidChangeNotification;
+void AUTaurusFollowTrack(void);
+
 #pragma mark - settings rows (Settings/SGModPage.h)
 
 @interface SGModRow : NSObject
