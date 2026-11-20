@@ -1,0 +1,9 @@
+Package: space.fuckmmw.aura
+Name: Aura
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: On-device AI effects for the Taurus redesigned Spotify player: living covers, the artist stepping out of the cover, a theme from the cover, upscaled small covers.
+Maintainer: fuckmmw
+Author: fuckmmw
+Section: Tweaks
+Depends: firmware (>= 16.0)
