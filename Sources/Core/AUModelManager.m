@@ -46,6 +46,7 @@ static const NSTimeInterval kIdleUnload = 300;
     configuration.timeoutIntervalForRequest = 30;
     configuration.timeoutIntervalForResource = 600;
     configuration.waitsForConnectivity = NO;
+    configuration.HTTPAdditionalHeaders = @{@"User-Agent": @"Aura/" AURA_VERSION " (iOS; CFNetwork)"};
     _session = [NSURLSession sessionWithConfiguration:configuration];
     AUModelEntry *depth = [AUModelEntry new];
     depth.modelID = AUModelDepth;

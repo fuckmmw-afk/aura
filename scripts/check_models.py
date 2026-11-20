@@ -11,6 +11,12 @@ import coremltools as ct
 
 BASE = sys.argv[1].rstrip("/")
 failures = 0
+# Cloudflare in front of the server turns away Python's default User-Agent.
+HEADERS = {"User-Agent": "Aura-CI/1.0"}
+
+
+def get(url, timeout):
+    return urllib.request.urlopen(urllib.request.Request(url, headers=HEADERS), timeout=timeout)
 
 
 def check(cond, message):
@@ -21,12 +27,12 @@ def check(cond, message):
 
 
 def fetch(model_id, root):
-    with urllib.request.urlopen(f"{BASE}/{model_id}/manifest.json", timeout=60) as r:
+    with get(f"{BASE}/{model_id}/manifest.json", 60) as r:
         manifest = json.load(r)
     for f in manifest["files"]:
         target = os.path.join(root, f["path"])
         os.makedirs(os.path.dirname(target), exist_ok=True)
-        with urllib.request.urlopen(f"{BASE}/{model_id}/{f['path']}", timeout=300) as r, open(target, "wb") as out:
+        with get(f"{BASE}/{model_id}/{f['path']}", 300) as r, open(target, "wb") as out:
             out.write(r.read())
         digest = hashlib.sha256(open(target, "rb").read()).hexdigest()
         check(digest == f["sha256"] and os.path.getsize(target) == f["size"], f"{model_id}: {f['path']} checksum")
