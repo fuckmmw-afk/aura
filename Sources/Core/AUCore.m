@@ -32,6 +32,10 @@ void AULog(NSString *format, ...) {
     NSString *line = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
     os_log(OS_LOG_DEFAULT, "[aura] %{public}@", line);
+    static BOOL toStderr;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ toStderr = getenv("AURA_LOG_STDERR") != NULL; });
+    if (toStderr) fprintf(stderr, "[aura] %s\n", line.UTF8String);
     NSDate *now = [NSDate date];
     dispatch_async(logQueue(), ^{
         static NSDateFormatter *formatter;

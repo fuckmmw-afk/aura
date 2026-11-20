@@ -256,6 +256,7 @@ AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error)
                     if (one[i] > peak) peak = one[i];
                     if (one[i] > soft[i]) soft[i] = one[i];
                 }
+                AULog(@"cutout: person %lu peak %.2f", (unsigned long)index, peak / 255.0);
                 if (peak >= 38) {
                     float scale = 255.0f / peak;
                     for (size_t i = 0; i < mw * mh; i++) {
@@ -280,6 +281,8 @@ AUCutoutResult AUCutoutSubject(CGImageRef image, BOOL objects, NSString **error)
                     area += one[i];
                     if (soft) overlap += one[i] * (soft[i] / 255.0);
                 }
+                AULog(@"cutout: subject %lu covers %.1f%%, %.0f%% of it person", (unsigned long)index, area / 255.0 / (mw * mh) * 100,
+                      area > 0 ? overlap / area * 100 : 0);
                 if (objects || (area > 0 && overlap / area > 0.25)) {
                     for (size_t i = 0; i < mw * mh; i++) {
                         uint8_t v = sg_curve[one[i]];

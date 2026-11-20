@@ -79,7 +79,7 @@ jobs:
             -framework ImageIO -framework CoreVideo -framework QuartzCore -framework CoreGraphics -o aura-harness
           mkdir -p covers harness
           while read -r name id; do curl -fsSL -A "Aura-CI/1.0" -o "covers/$name.jpg" "https://i.scdn.co/image/$id"; done < Tests/covers.txt
-          ./aura-harness harness covers/*.jpg
+          AURA_LOG_STDERR=1 ./aura-harness harness covers/*.jpg
 
       - uses: actions/upload-artifact@v4
         if: always()
