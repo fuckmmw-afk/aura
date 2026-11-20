@@ -5,6 +5,7 @@
 #import "Core/AUTaurus.h"
 #import "Features/AUPipeline.h"
 #import "UI/AUCoverEffects.h"
+#import "UI/AULockScreen.h"
 #import "UI/AUSettings.h"
 #import "UI/AUTheme.h"
 
@@ -92,6 +93,7 @@ static void start(void) {
     }
     if (NSClassFromString(@"UIGlassEffect")) %init(Glass);
     AUThemeStart();
+    AULockScreenStart();
     AULog(@"Aura %s started in %.1f ms on iOS %@, footprint %@, models from %@", AURA_VERSION, AUNowMs() - started,
           UIDevice.currentDevice.systemVersion, AUBytes(AUFootprint()), AUModelManager.shared.serverConfigured ? @"the server" : @"nowhere (no URL in this build)");
 }

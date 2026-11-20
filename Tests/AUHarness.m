@@ -8,6 +8,8 @@
 #import "Features/AUPalette.h"
 #import "Features/AUVision.h"
 #import "UI/AUParallaxRenderer.h"
+#import "UI/AULockScreen.h"
+#import <AVFoundation/AVFoundation.h>
 
 static NSString *outDir;
 
@@ -114,6 +116,24 @@ int main(int argc, const char *argv[]) {
                 CGImageRef fill = [renderer renderImageWidth:402 height:546];
                 save(fill, [NSString stringWithFormat:@"%@-5-fill-tilt%d.png", name, i]);
                 if (fill) CGImageRelease(fill);
+            }
+            // The lock screen's 3D flight: a 6 s loop, 3:4, as the phone would write it.
+            {
+                AULockClipInput input = {cut.background ?: cover, cut.background && soft ? soft : depth, cut.cutout};
+                CGSize size = CGSizeMake(896, 1200);
+                for (int i = 0; i < 2; i++) {
+                    CGImageRef frame = AULockClipFrame(input, size, i * 0.25, YES);
+                    save(frame, [NSString stringWithFormat:@"%@-8-lock-%d.png", name, i]);
+                    if (frame) CGImageRelease(frame);
+                }
+                NSURL *clip = [NSURL fileURLWithPath:[outDir stringByAppendingPathComponent:[name stringByAppendingString:@"-9-lock.mp4"]]];
+                t = AUNowMs();
+                BOOL written = AULockClipWrite(clip, input, size, YES);
+                AVURLAsset *asset = [AVURLAsset assetWithURL:clip];
+                AVAssetTrack *track = [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+                printf("  lock clip %s in %.0f ms: %.2f s, %.0fx%.0f\n", written ? "written" : "NOT written", AUNowMs() - t,
+                       CMTimeGetSeconds(asset.duration), track.naturalSize.width, track.naturalSize.height);
+                if (!written || fabs(CMTimeGetSeconds(asset.duration) - 6) > 0.1 || track.naturalSize.width != 896) failures++;
             }
             t = AUNowMs();
             [renderer setColor:cover depth:depth];

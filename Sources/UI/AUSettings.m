@@ -3,6 +3,7 @@
 #import "Core/AUModelManager.h"
 #import "Core/AUTaurus.h"
 #import "Features/AUPipeline.h"
+#import "UI/AULockScreen.h"
 
 #define ADD(array, row) do { id _r = (row); if (_r) [(array) addObject:_r]; } while (0)
 
@@ -63,6 +64,12 @@ UIViewController *AUSettingsPage(void) {
     upscale.changed = ^(BOOL on) { AUSettingsChanged(); };
     ADD(cover, AURowSymbol(upscale, @"arrow.up.left.and.arrow.down.right"));
     ADD(sections, AUSection(@"Обложка и тема", cover, kRestart));
+
+    NSMutableArray *lock = [NSMutableArray array];
+    SGModRow *lockRow = AURowChoice(@"Обложка на экране блокировки", nil, AUKeyLockScreen, @[@"3D-облёт", @"Растянуть", @"Выкл"], 0);
+    lockRow.chosen = ^(NSInteger index) { AUSettingsChanged(); };
+    ADD(lock, AURowSymbol(lockRow, @"lock.iphone"));
+    ADD(sections, AUSection(@"Экран блокировки", lock, @"iOS 26+. Обложка на весь экран блокировки. «3D-облёт» — зацикленное видео: камера медленно ходит над картой глубины, артист впереди (гироскопа на локскрине нет). Заменяет стиль экрана блокировки Taurus."));
 
     NSMutableArray *models = [NSMutableArray array];
     ADD(models, modelRow(AUModelDepth, @"глубина"));
