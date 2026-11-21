@@ -9,6 +9,7 @@
 #import "Features/AUVision.h"
 #import "UI/AULockScreen.h"
 #import "Features/AUDepthLayers.h"
+#import "UI/AUParallaxRenderer.h"
 #import <AVFoundation/AVFoundation.h>
 
 static NSString *outDir;
@@ -100,25 +101,41 @@ int main(int argc, const char *argv[]) {
                 }
             }
             CGImageRef soft = depth ? AUSoftenedDepth(depth) : NULL;
-            // The app's look, as the lock screen's clip draws the same layers: the cover square and Fill's 402 x 546.
+            // The app's look: the Metal warp by the softened depth, the subject over it on the same zoomed rectangle.
             {
-                AULockClipInput input = {cut.background ?: cover, cut.background && soft ? soft : depth, cut.cutout};
-                for (int i = 0; i < 2; i++) {
-                    CGImageRef square = AULockClipFrame(input, CGSizeMake(600, 600), i * 0.25, YES);
-                    save(square, [NSString stringWithFormat:@"%@-4-cover-%d.png", name, i]);
-                    if (square) CGImageRelease(square);
-                    CGImageRef fill = AULockClipFrame(input, CGSizeMake(402, 546), i * 0.25, YES);
-                    save(fill, [NSString stringWithFormat:@"%@-5-fill-%d.png", name, i]);
-                    if (fill) CGImageRelease(fill);
+                AUParallaxRenderer *renderer = [AUParallaxRenderer new];
+                CGImageRef map = soft ?: depth;
+                [renderer setColor:cut.background ?: cover depth:map];
+                renderer.zoom = 1 + 1.1 * 0.04;
+                renderer.strength = 0.04;
+                CGSize sizes[2] = {{600, 600}, {402, 546}};
+                for (int k = 0; k < 2; k++) {
+                    for (int i = 0; i < 2; i++) {
+                        CGPoint tilt = i ? CGPointMake(1, 0.6) : CGPointMake(-1, -0.3);
+                        renderer.tilt = tilt;
+                        CGSize size = sizes[k];
+                        CGImageRef frame = [renderer renderImageWidth:(size_t)size.width height:(size_t)size.height];
+                        if (!frame) continue;
+                        CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+                        CGContextRef c = CGBitmapContextCreate(NULL, (size_t)size.width, (size_t)size.height, 8, 0, space,
+                                                               kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+                        CGColorSpaceRelease(space);
+                        CGContextDrawImage(c, CGRectMake(0, 0, size.width, size.height), frame);
+                        if (cut.cutout) {
+                            double side = MAX(size.width, size.height) * renderer.zoom, amount = 0.04 * side * (AUSubjectDepth - 0.5);
+                            CGContextDrawImage(c, CGRectMake((size.width - side) / 2 + tilt.x * amount, (size.height - side) / 2 - tilt.y * amount, side, side), cut.cutout);
+                        }
+                        CGImageRef shot = CGBitmapContextCreateImage(c);
+                        CGContextRelease(c);
+                        save(shot, [NSString stringWithFormat:@"%@-%d-%s-%d.png", name, 4 + k, k ? "fill" : "cover", i]);
+                        CGImageRelease(shot);
+                        CGImageRelease(frame);
+                    }
                 }
-                double tl = AUNowMs();
-                AUDepthLayers layers = AUDepthLayersMake(input.color, input.depth);
-                printf("  depth layers %.1f ms\n", AUNowMs() - tl);
-                AUDepthLayersRelease(&layers);
             }
             // The lock screen's 3D flight: a 6 s loop, 3:4, as the phone would write it.
             {
-                AULockClipInput input = {cut.background ?: cover, cut.background && soft ? soft : depth, cut.cutout};
+                AULockClipInput input = {cut.background ?: cover, soft ?: depth, cut.cutout};
                 CGSize size = CGSizeMake(896, 1200);
                 for (int i = 0; i < 2; i++) {
                     CGImageRef frame = AULockClipFrame(input, size, i * 0.25, YES);

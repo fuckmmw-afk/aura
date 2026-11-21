@@ -2,6 +2,7 @@
 #import "Core/AUCore.h"
 #import "Core/AUTaurus.h"
 #import "Features/AUDepthLayers.h"
+#import "AUParallaxRenderer.h"
 #import "Features/AUPipeline.h"
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
@@ -19,25 +20,16 @@ typedef NS_ENUM(NSInteger, AUSurfaceKind) {
     AUSurfaceFill,
 };
 
-// The layers an artwork is shown with, made once off the main queue.
-@interface AUShownLayers : NSObject
-@property (nonatomic, weak) AUArtwork *artwork;
-@property (nonatomic) BOOL depth, subject;
-@property (nonatomic, strong) id far, middle, near;   // CGImageRef as id
-@end
-
-@implementation AUShownLayers
-@end
-
-// One place the effects are drawn: a stage of three depth layers, and the subject.
+// One place the effects are drawn: the cover bent by its softened depth (Metal), and the subject over it.
 @interface AUSurface : NSObject
 @property (nonatomic) AUSurfaceKind kind;
 @property (nonatomic, strong) CALayer *stage;
-@property (nonatomic, strong) NSArray<CALayer *> *planes;
+@property (nonatomic, strong) AUParallaxRenderer *renderer;
 @property (nonatomic, strong) CALayer *subjectClip;          // Fill: the fill's frame, clipped, faded later than it
 @property (nonatomic, strong) CALayer *subject;
 @property (nonatomic, strong) CAGradientLayer *subjectMask;
-@property (nonatomic, weak) AUShownLayers *content;
+@property (nonatomic, weak) AUArtwork *content;
+@property (nonatomic) BOOL contentDepth, contentSubject;
 @property (nonatomic) BOOL attached;
 @property (nonatomic) CGRect pictureRect;                    // where the cover is drawn in the stage, zoomed
 @end
@@ -105,11 +97,9 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
     UIView *_plane;                  // over the cover, inside it, clipped to its corners
     UIView *_subjectHost;            // a zero-size view in the tilt view, so nothing takes it for the cover
     AUSurface *_coverSurface, *_fillSurface;
-    AUShownLayers *_layers;          // what the surfaces show
     __weak AUArtwork *_shown;
     NSString *_shownKey;
-    BOOL _shownDepth, _shownSubject, _wantPlane, _building;
-    dispatch_queue_t _work;
+    BOOL _shownDepth, _shownSubject, _wantPlane;
     CADisplayLink *_link;
     CFTimeInterval _lastMove;
     CMMotionManager *_motion;
@@ -132,7 +122,6 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     _tilts = [NSHashTable weakObjectsHashTable];
-    _work = dispatch_queue_create("aura.layers", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
     _motion = [CMMotionManager new];
     _motionQueue = [NSOperationQueue new];
     _motionQueue.maxConcurrentOperationCount = 1;
@@ -253,13 +242,9 @@ static UIView *taurusField(void) {
     surface.kind = kind;
     surface.stage = plainLayer();
     surface.stage.masksToBounds = YES;
-    NSMutableArray *planes = [NSMutableArray array];
-    for (int k = 0; k < 3; k++) {
-        CALayer *plane = plainLayer();
-        [surface.stage addSublayer:plane];
-        [planes addObject:plane];
-    }
-    surface.planes = planes;
+    surface.renderer = [AUParallaxRenderer new];
+    surface.renderer.layer.actions = noActions();
+    [surface.stage addSublayer:surface.renderer.layer];
     CALayer *subject = plainLayer();
     subject.opacity = 0;
     if (kind == AUSurfaceCover) {
@@ -309,20 +294,24 @@ static UIView *taurusField(void) {
 #pragma mark - placing a surface
 
 // The picture aspect-filled into `bounds` and zoomed just enough that a full shift never shows its edge.
+static CGFloat zoomFor(BOOL moving) {
+    return moving ? 1 + 1.1 * kStrength * AUNumber(AUKeyDepthStrength, 1.0) : 1;
+}
+
 static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
-    CGFloat side = MAX(bounds.size.width, bounds.size.height);
-    if (moving) side *= 1 + 2 * kStrength * 0.4 * AUNumber(AUKeyDepthStrength, 1.0);
+    CGFloat side = MAX(bounds.size.width, bounds.size.height) * zoomFor(moving);
     return CGRectMake(CGRectGetMidX(bounds) - side / 2, CGRectGetMidY(bounds) - side / 2, side, side);
 }
 
 - (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, _shownDepth || _shownSubject);
-    for (CALayer *plane in surface.planes) {
-        plane.bounds = (CGRect){CGPointZero, surface.pictureRect.size};
-        plane.position = CGPointMake(CGRectGetMidX(surface.pictureRect), CGRectGetMidY(surface.pictureRect));
-    }
+    BOOL moving = _shownDepth || _shownSubject;
+    surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, moving);
+    surface.renderer.layer.frame = (CGRect){CGPointZero, bounds.size};
+    surface.renderer.zoom = zoomFor(moving);
+    // The whole Fill at 3x would be two million pixels a frame; at 2x it is under one and still sharp under the fade.
+    [surface.renderer layoutForScale:surface.kind == AUSurfaceFill ? 2 : UIScreen.mainScreen.scale];
     [CATransaction commit];
     [self moveSurfaces];
 }
@@ -433,10 +422,9 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
     [CATransaction setDisableActions:YES];
     for (AUSurface *surface in [self attachedSurfaces]) {
         CGFloat side = surface.pictureRect.size.width;
-        for (int k = 0; k < 3; k++) {
-            CGFloat amount = moving ? strength * side * (AUDepthLayerDepths[k] - 0.5) : 0;
-            surface.planes[k].affineTransform = CGAffineTransformMakeTranslation(_tiltNow.x * amount, _tiltNow.y * amount);
-        }
+        surface.renderer.strength = moving ? strength : 0;
+        surface.renderer.tilt = _tiltNow;
+        if (surface.content) [surface.renderer render];
         CGFloat amount = (moving || _shownSubject) ? strength * side * (AUSubjectDepth - 0.5) : 0;
         CGPoint offset = CGPointMake(_tiltNow.x * amount, _tiltNow.y * amount);
         if (surface.kind == AUSurfaceCover) {
@@ -476,7 +464,6 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
 
 - (void)refresh {
     _shownKey = nil;
-    _layers = nil;
     [self apply:[AUPipeline shared].current animated:YES];
 }
 
@@ -554,48 +541,21 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
         [self updateMotion];
         return;
     }
-    // The layers are cut off the main queue; until they are, what showed stays (or nothing, for a new cover).
-    AUShownLayers *layers = _layers;
-    if (layers.artwork != artwork || layers.depth != depth || layers.subject != subject) {
-        if (_building) return;
-        _building = YES;
-        UIImage *color = subject ? artwork.background : artwork.source;
-        UIImage *map = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth) : nil;
-        __weak AUArtwork *weakArtwork = artwork;
-        double started = AUNowMs();
-        dispatch_async(_work, ^{
-            AUDepthLayers made = AUDepthLayersMake(color.CGImage, map.CGImage);
-            AUShownLayers *built = [AUShownLayers new];
-            built.depth = depth;
-            built.subject = subject;
-            built.far = (__bridge id)made.far;
-            built.middle = (__bridge id)made.middle;
-            built.near = (__bridge id)made.near;
-            AUDepthLayersRelease(&made);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                self->_building = NO;
-                AUArtwork *still = weakArtwork;
-                built.artwork = still;
-                AUStatRecord(@"layers", AUNowMs() - started);
-                if (still && still == [AUPipeline shared].current) self->_layers = built;
-                // Whatever is current now: a cover that came while these were cut is not left waiting.
-                [self apply:[AUPipeline shared].current animated:YES];
-            });
-        });
-        return;
-    }
     BOOL changed = NO;
     for (AUSurface *surface in surfaces) {
-        if (surface.content == layers) continue;
+        if (surface.content == artwork && surface.contentDepth == depth && surface.contentSubject == subject) continue;
         changed = YES;
+        // The depth heavily softened, always: a map with edges would tear the picture along them.
+        UIImage *color = subject ? artwork.background : artwork.source;
+        UIImage *map = depth ? (artwork.softDepth ?: artwork.depth) : nil;
+        [surface.renderer setColor:color.CGImage depth:map.CGImage];
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        surface.planes[0].contents = layers.far;
-        surface.planes[1].contents = layers.middle;
-        surface.planes[2].contents = layers.near;
         surface.subject.contents = subject ? (__bridge id)artwork.cutout.CGImage : nil;
         [CATransaction commit];
-        surface.content = layers;
+        surface.content = artwork;
+        surface.contentDepth = depth;
+        surface.contentSubject = subject;
     }
     BOOL first = !_wantPlane;
     _shownDepth = depth;

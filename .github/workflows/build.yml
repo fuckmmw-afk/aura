@@ -40,7 +40,7 @@ jobs:
           AURA_MODELS_URL: ${{ secrets.AURA_MODELS_URL }}
         run: |
           test -n "$AURA_MODELS_URL" || { echo "::error::AURA_MODELS_URL secret is not set"; exit 1; }
-          gmake -j4 FINALPACKAGE=1 AURA_VERSION="0.4.0-${GITHUB_SHA::7}" AURA_MODELS_URL="$AURA_MODELS_URL"
+          gmake -j4 FINALPACKAGE=1 AURA_VERSION="0.4.1-${GITHUB_SHA::7}" AURA_MODELS_URL="$AURA_MODELS_URL"
 
       - name: Check the dylib
         run: |
@@ -74,8 +74,8 @@ jobs:
             -F "$IOS/System/Library/Frameworks" -L"$IOS/usr/lib" -fobjc-arc -ISources \
             -DAURA_VERSION='"harness"' -DAURA_MODELS_URL="\"$AURA_MODELS_URL\"" \
             Tests/AUHarness.m Sources/Core/AUCore.m Sources/Core/AUManifest.m Sources/Core/AUModelManager.m \
-            Sources/Features/AUImage.m Sources/Features/AUPalette.m Sources/Features/AUVision.m Sources/Features/AUDepthLayers.m Sources/UI/AULockScreen.m \
-            -framework UIKit -framework CoreML -framework Vision -framework CoreImage -framework Accelerate \
+            Sources/Features/AUImage.m Sources/Features/AUPalette.m Sources/Features/AUVision.m Sources/Features/AUDepthLayers.m Sources/UI/AULockScreen.m Sources/UI/AUParallaxRenderer.m \
+            -framework UIKit -framework CoreML -framework Vision -framework Metal -framework CoreImage -framework Accelerate \
             -framework ImageIO -framework CoreVideo -framework QuartzCore -framework CoreGraphics -framework AVFoundation -framework CoreMedia -o aura-harness
           mkdir -p covers harness
           while read -r name id; do curl -fsSL -A "Aura-CI/1.0" -o "covers/$name.jpg" "https://i.scdn.co/image/$id"; done < Tests/covers.txt

@@ -1,6 +1,7 @@
 #import "AULockScreen.h"
 #import "Core/AUCore.h"
 #import "Features/AUImage.h"
+#import "Features/AUDepthLayers.h"
 #import <AVFoundation/AVFoundation.h>
 #import <TargetConditionals.h>
 #import <dlfcn.h>
@@ -12,22 +13,24 @@
 #endif
 
 static const int32_t kFPS = 30, kLoopSeconds = 6;
-static const double kStrength = 0.04, kZoom = 1.07;
+static const double kStrength = 0.04;
 
 #pragma mark - the clip, on the CPU
 //
 // The clip is made when the lock screen asks for it, and Spotify is then in the background, where iOS lets no app
-// use the GPU (a Metal frame comes out black). So it is drawn with Core Graphics: the cover cut by its depth map into
-// three layers (far, middle, near, soft-edged), each shifted by its depth as the camera circles, the subject in
-// front with its shadow baked in, and a shade at the foot for the lock screen's controls.
+// use the GPU (a Metal frame comes out black). So it is drawn on the CPU, as the app's Metal one is: the cover bent
+// by its softened depth map as the camera circles (each pixel moved by its depth, sampled bilinearly, the rows
+// split over the cores), the subject in front with its shadow baked in, and a shade at the foot for the controls.
 
 typedef struct {
-    CGImageRef layers[3];       // far (opaque), middle, near; each the canvas's size
-    double depths[3];
+    uint8_t *source;            // the picture, BGRA premultiplied, the canvas's size (the frame with a margin)
+    size_t sourceRow;
+    float *shift;               // per frame pixel: the full tilt's shift in pixels, kStrength * side * (depth - 0.5)
     CGImageRef subject;         // with its shadow, the canvas's size, or NULL
     CGImageRef shade;
-    CGSize size, canvas;        // the frame, and the frame with a margin for the shifts all round
-    double side;                // the cover's side as drawn
+    CGSize size, canvas;
+    double side, margin;
+    BOOL moving;
 } AUClipLayers;
 
 static CGPoint tiltAt(double phase) {
@@ -41,63 +44,40 @@ static CGContextRef bgraContext(size_t width, size_t height, void *data, size_t 
     return context;
 }
 
-// The cover aspect-filled and zoomed into the canvas, as the frame's middle.
-static CGRect coverRect(AUClipLayers *l) {
-    return CGRectMake((l->canvas.width - l->side) / 2, (l->canvas.height - l->side) / 2, l->side, l->side);
-}
-
-static float smooth(float x, float a, float b) {
-    float t = fminf(1, fmaxf(0, (x - a) / (b - a)));
-    return t * t * (3 - 2 * t);
-}
-
 static AUClipLayers makeLayers(AULockClipInput input, CGSize size, BOOL moving) {
-    AUClipLayers l = {{NULL, NULL, NULL}, {0.25, 0.55, 0.85}, NULL, NULL, size, size, 0};
-    BOOL layered = moving && input.depth;
-    double zoom = layered ? kZoom : 1.0;
+    AUClipLayers l;
+    memset(&l, 0, sizeof(l));
+    l.size = size;
+    l.moving = moving && input.depth;
+    double zoom = l.moving ? 1 + 1.1 * kStrength : 1.0;
     l.side = MAX(size.width, size.height) * zoom;
-    double margin = layered ? ceil(kStrength * l.side * 0.6) : 0;
-    l.canvas = CGSizeMake(size.width + 2 * margin, size.height + 2 * margin);
+    l.margin = l.moving ? ceil(kStrength * l.side * 0.55) + 2 : 0;
+    l.canvas = CGSizeMake(size.width + 2 * l.margin, size.height + 2 * l.margin);
     size_t cw = (size_t)l.canvas.width, ch = (size_t)l.canvas.height;
-    CGRect rect = coverRect(&l);
-    CGContextRef far = bgraContext(cw, ch, NULL, 0);
-    CGContextSetInterpolationQuality(far, kCGInterpolationHigh);
-    CGContextDrawImage(far, rect, input.color);
-    l.layers[0] = CGBitmapContextCreateImage(far);
-    if (layered) {
-        // The depth map at the canvas's size, and the middle and near layers cut from the cover by it.
-        NSMutableData *depth = [NSMutableData dataWithLength:cw * ch];
+    CGRect rect = CGRectMake((l.canvas.width - l.side) / 2, (l.canvas.height - l.side) / 2, l.side, l.side);
+    l.sourceRow = cw * 4;
+    l.source = calloc(l.sourceRow * ch, 1);
+    CGContextRef source = bgraContext(cw, ch, l.source, l.sourceRow);
+    CGContextSetInterpolationQuality(source, kCGInterpolationHigh);
+    CGContextDrawImage(source, rect, input.color);
+    CGContextRelease(source);
+    if (l.moving) {
+        size_t w = (size_t)size.width, h = (size_t)size.height;
+        uint8_t *depth = calloc(cw * ch, 1);
         CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
-        CGContextRef d = CGBitmapContextCreate(depth.mutableBytes, cw, ch, 8, cw, gray, (CGBitmapInfo)kCGImageAlphaNone);
+        CGContextRef d = CGBitmapContextCreate(depth, cw, ch, 8, cw, gray, (CGBitmapInfo)kCGImageAlphaNone);
         CGColorSpaceRelease(gray);
         CGContextSetInterpolationQuality(d, kCGInterpolationHigh);
         CGContextDrawImage(d, rect, input.depth);
         CGContextRelease(d);
-        const uint8_t *dp = depth.bytes;
-        const uint8_t *src = CGBitmapContextGetData(far);
-        size_t srcRow = CGBitmapContextGetBytesPerRow(far);
-        float bands[2][2] = {{0.33f, 0.5f}, {0.62f, 0.78f}};
-        for (int k = 0; k < 2; k++) {
-            CGContextRef layer = bgraContext(cw, ch, NULL, 0);
-            uint8_t *dst = CGBitmapContextGetData(layer);
-            size_t dstRow = CGBitmapContextGetBytesPerRow(layer);
-            // Core Graphics' rows run from the top in memory, as the depth context's do.
-            for (size_t y = 0; y < ch; y++) {
-                const uint8_t *s = src + y * srcRow;
-                uint8_t *o = dst + y * dstRow;
-                for (size_t x = 0; x < cw; x++) {
-                    float a = smooth(dp[y * cw + x] / 255.0f, bands[k][0], bands[k][1]);
-                    o[x * 4 + 0] = (uint8_t)(s[x * 4 + 0] * a);
-                    o[x * 4 + 1] = (uint8_t)(s[x * 4 + 1] * a);
-                    o[x * 4 + 2] = (uint8_t)(s[x * 4 + 2] * a);
-                    o[x * 4 + 3] = (uint8_t)(255 * a);
-                }
-            }
-            l.layers[k + 1] = CGBitmapContextCreateImage(layer);
-            CGContextRelease(layer);
+        l.shift = malloc(w * h * sizeof(float));
+        float scale = (float)(kStrength * l.side);
+        size_t m = (size_t)l.margin;
+        for (size_t y = 0; y < h; y++) {
+            for (size_t x = 0; x < w; x++) l.shift[y * w + x] = scale * (depth[(y + m) * cw + x + m] / 255.0f - 0.5f);
         }
+        free(depth);
     }
-    CGContextRelease(far);
     if (input.subject) {
         CGContextRef s = bgraContext(cw, ch, NULL, 0);
         CGContextSetInterpolationQuality(s, kCGInterpolationHigh);
@@ -122,27 +102,63 @@ static AUClipLayers makeLayers(AULockClipInput input, CGSize size, BOOL moving) 
 }
 
 static void freeLayers(AUClipLayers *l) {
-    for (int k = 0; k < 3; k++) if (l->layers[k]) CGImageRelease(l->layers[k]);
+    free(l->source);
+    free(l->shift);
     if (l->subject) CGImageRelease(l->subject);
     if (l->shade) CGImageRelease(l->shade);
+    memset(l, 0, sizeof(*l));
+}
+
+// The warp into `pixels` (BGRA, rows from the top, `rowBytes` apart): out(x, y) = source(x - tx * s, y - ty * s), s
+// the pixel's depth shift, sampled bilinearly. Down the screen is +y here as in the app.
+static void warp(AUClipLayers *l, uint8_t *pixels, size_t rowBytes, CGPoint tilt) {
+    size_t w = (size_t)l->size.width, h = (size_t)l->size.height, cw = (size_t)l->canvas.width, ch = (size_t)l->canvas.height;
+    double m = l->margin;
+    const uint8_t *src = l->source;
+    size_t srcRow = l->sourceRow;
+    const float *shift = l->shift;
+    float tx = (float)tilt.x, ty = (float)tilt.y;
+    size_t chunk = 16;
+    dispatch_apply((h + chunk - 1) / chunk, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t c) {
+        size_t y0 = c * chunk, y1 = MIN(h, y0 + chunk);
+        for (size_t y = y0; y < y1; y++) {
+            uint32_t *out = (uint32_t *)(pixels + y * rowBytes);
+            for (size_t x = 0; x < w; x++) {
+                float s = shift[y * w + x];
+                float sx = (float)(x + m) - tx * s, sy = (float)(y + m) - ty * s;
+                if (sx < 0) sx = 0;
+                if (sy < 0) sy = 0;
+                if (sx > cw - 1.001f) sx = cw - 1.001f;
+                if (sy > ch - 1.001f) sy = ch - 1.001f;
+                size_t ix = (size_t)sx, iy = (size_t)sy;
+                uint32_t fx = (uint32_t)((sx - ix) * 256), fy = (uint32_t)((sy - iy) * 256);
+                const uint8_t *p00 = src + iy * srcRow + ix * 4, *p10 = p00 + 4, *p01 = p00 + srcRow, *p11 = p01 + 4;
+                uint32_t result = 0;
+                for (int k = 0; k < 4; k++) {
+                    uint32_t top = p00[k] * (256 - fx) + p10[k] * fx, bottom = p01[k] * (256 - fx) + p11[k] * fx;
+                    result |= ((top * (256 - fy) + bottom * fy) >> 16) << (k * 8);
+                }
+                out[x] = result;
+            }
+        }
+    });
 }
 
 static void drawFrame(CGContextRef context, AUClipLayers *l, double phase, BOOL moving) {
-    CGPoint tilt = moving ? tiltAt(phase) : CGPointZero;
-    double margin = (l->canvas.width - l->size.width) / 2;
-    CGContextSetInterpolationQuality(context, kCGInterpolationLow);
-    CGContextSetBlendMode(context, kCGBlendModeCopy);
-    for (int k = 0; k < 3; k++) {
-        if (!l->layers[k]) continue;
-        double amount = kStrength * l->side * (l->depths[k] - 0.5);
-        // Down the screen is up in Core Graphics: the tilt's y is turned over.
-        CGRect at = CGRectMake(-margin + tilt.x * amount, -margin - tilt.y * amount, l->canvas.width, l->canvas.height);
-        CGContextDrawImage(context, at, l->layers[k]);
-        if (k == 0) CGContextSetBlendMode(context, kCGBlendModeNormal);
+    CGPoint tilt = moving && l->moving ? tiltAt(phase) : CGPointZero;
+    size_t w = (size_t)l->size.width, h = (size_t)l->size.height;
+    uint8_t *pixels = CGBitmapContextGetData(context);
+    if (l->moving && pixels) {
+        warp(l, pixels, CGBitmapContextGetBytesPerRow(context), tilt);
+    } else {
+        // Still: the picture straight from the canvas's middle.
+        size_t m = (size_t)l->margin, row = CGBitmapContextGetBytesPerRow(context);
+        for (size_t y = 0; y < h && pixels; y++) memcpy(pixels + y * row, l->source + (y + m) * l->sourceRow + m * 4, w * 4);
     }
     if (l->subject) {
-        double amount = kStrength * l->side * 0.55 * (moving && l->layers[1] ? 1 : 0);
-        CGContextDrawImage(context, CGRectMake(-margin + tilt.x * amount, -margin - tilt.y * amount, l->canvas.width, l->canvas.height), l->subject);
+        double amount = l->moving ? kStrength * l->side * (AUSubjectDepth - 0.5) : 0;
+        CGContextSetInterpolationQuality(context, kCGInterpolationLow);
+        CGContextDrawImage(context, CGRectMake(-l->margin + tilt.x * amount, -l->margin - tilt.y * amount, l->canvas.width, l->canvas.height), l->subject);
     }
     CGContextDrawImage(context, CGRectMake(0, 0, l->size.width, l->size.height), l->shade);
 }
@@ -324,10 +340,10 @@ static AULockMaterial *materialOf(AUArtwork *artwork, BOOL moving) {
     BOOL subject = AUEnabled(AUKeyCutout) && artwork.cutout && artwork.background;
     BOOL depth = moving && AUEnabled(AUKeyDepth) && artwork.depth;
     material.color = subject ? artwork.background : artwork.source;
-    material.depth = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth) : nil;
+    material.depth = depth ? (artwork.softDepth ?: artwork.depth) : nil;
     material.subject = subject ? artwork.cutout : nil;
     material.moving = depth;
-    material.signature = [NSString stringWithFormat:@"%@|%d%d|%d|v2", artwork.key, depth, subject, artwork.upscaled];
+    material.signature = [NSString stringWithFormat:@"%@|%d%d|%d|v3", artwork.key, depth, subject, artwork.upscaled];
     return material;
 }
 
@@ -433,7 +449,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
             NSString *name = [NSString stringWithFormat:@"%@-%.0fx%.0f.mp4", AUSHA1(material.signature), size.width, size.height];
             file = [clipFolder() URLByAppendingPathComponent:name];
         };
-        NSString *artworkID = [NSString stringWithFormat:@"aura-%@-%ld-v2", AUSHA1(uri), (long)mode];
+        NSString *artworkID = [NSString stringWithFormat:@"aura-%@-%ld-v3", AUSHA1(uri), (long)mode];
         MPMediaItemAnimatedArtwork *artwork = [[artworkClass alloc] initWithArtworkID:artworkID
             previewImageRequestHandler:^(CGSize wanted, void (^completion)(UIImage *)) {
                 dispatch_async(clipQueue(), ^{
