@@ -13,7 +13,7 @@
 #endif
 
 static const int32_t kFPS = 30, kLoopSeconds = 6;
-static const double kStrength = 0.04;
+static const double kStrength = 0.03;
 
 #pragma mark - the clip, on the CPU
 //
@@ -25,7 +25,7 @@ static const double kStrength = 0.04;
 typedef struct {
     uint8_t *source;            // the picture, BGRA premultiplied, the canvas's size (the frame with a margin)
     size_t sourceRow;
-    float *shift;               // per frame pixel: the full tilt's shift in pixels, kStrength * side * (depth - 0.5)
+    uint8_t *depth;             // the depth map at the canvas's size, near bright
     CGImageRef subject;         // with its shadow, the canvas's size, or NULL
     CGImageRef shade;
     CGSize size, canvas;
@@ -62,7 +62,6 @@ static AUClipLayers makeLayers(AULockClipInput input, CGSize size, BOOL moving) 
     CGContextDrawImage(source, rect, input.color);
     CGContextRelease(source);
     if (l.moving) {
-        size_t w = (size_t)size.width, h = (size_t)size.height;
         uint8_t *depth = calloc(cw * ch, 1);
         CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
         CGContextRef d = CGBitmapContextCreate(depth, cw, ch, 8, cw, gray, (CGBitmapInfo)kCGImageAlphaNone);
@@ -70,13 +69,7 @@ static AUClipLayers makeLayers(AULockClipInput input, CGSize size, BOOL moving) 
         CGContextSetInterpolationQuality(d, kCGInterpolationHigh);
         CGContextDrawImage(d, rect, input.depth);
         CGContextRelease(d);
-        l.shift = malloc(w * h * sizeof(float));
-        float scale = (float)(kStrength * l.side);
-        size_t m = (size_t)l.margin;
-        for (size_t y = 0; y < h; y++) {
-            for (size_t x = 0; x < w; x++) l.shift[y * w + x] = scale * (depth[(y + m) * cw + x + m] / 255.0f - 0.5f);
-        }
-        free(depth);
+        l.depth = depth;
     }
     if (input.subject) {
         CGContextRef s = bgraContext(cw, ch, NULL, 0);
@@ -103,29 +96,47 @@ static AUClipLayers makeLayers(AULockClipInput input, CGSize size, BOOL moving) 
 
 static void freeLayers(AUClipLayers *l) {
     free(l->source);
-    free(l->shift);
+    free(l->depth);
     if (l->subject) CGImageRelease(l->subject);
     if (l->shade) CGImageRelease(l->shade);
     memset(l, 0, sizeof(*l));
 }
 
-// The warp into `pixels` (BGRA, rows from the top, `rowBytes` apart): out(x, y) = source(x - tx * s, y - ty * s), s
-// the pixel's depth shift, sampled bilinearly. Down the screen is +y here as in the app.
+// Steep parallax into `pixels` (BGRA, rows from the top, `rowBytes` apart), as the app's shader does it: for each
+// pixel the depth map is marched from the near plane down until the surface is met, so each thing moves whole at its
+// depth and the near hides the far; the colour there is sampled bilinearly. Down the screen is +y as in the app.
 static void warp(AUClipLayers *l, uint8_t *pixels, size_t rowBytes, CGPoint tilt) {
     size_t w = (size_t)l->size.width, h = (size_t)l->size.height, cw = (size_t)l->canvas.width, ch = (size_t)l->canvas.height;
-    double m = l->margin;
-    const uint8_t *src = l->source;
+    float m = (float)l->margin;
+    const uint8_t *src = l->source, *depth = l->depth;
     size_t srcRow = l->sourceRow;
-    const float *shift = l->shift;
-    float tx = (float)tilt.x, ty = (float)tilt.y;
+    float ox = (float)(tilt.x * kStrength * l->side), oy = (float)(tilt.y * kStrength * l->side);
     size_t chunk = 16;
     dispatch_apply((h + chunk - 1) / chunk, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t c) {
         size_t y0 = c * chunk, y1 = MIN(h, y0 + chunk);
         for (size_t y = y0; y < y1; y++) {
             uint32_t *out = (uint32_t *)(pixels + y * rowBytes);
             for (size_t x = 0; x < w; x++) {
-                float s = shift[y * w + x];
-                float sx = (float)(x + m) - tx * s, sy = (float)(y + m) - ty * s;
+                float px = x + m, py = y + m;
+                #define DEPTH_AT(layer) ({ \
+                    float qx = px - ox * ((layer) - 0.5f), qy = py - oy * ((layer) - 0.5f); \
+                    long ix = lroundf(qx), iy = lroundf(qy); \
+                    if (ix < 0) ix = 0; if (iy < 0) iy = 0; if (ix >= (long)cw) ix = cw - 1; if (iy >= (long)ch) iy = ch - 1; \
+                    depth[iy * cw + ix] / 255.0f; })
+                const int steps = 16;
+                float layer = 1, step = 1.0f / steps, d = DEPTH_AT(layer), prevLayer = layer, prevD = d;
+                for (int i = 0; i < steps && d < layer; i++) {
+                    prevLayer = layer;
+                    prevD = d;
+                    layer -= step;
+                    d = DEPTH_AT(layer);
+                }
+                #undef DEPTH_AT
+                float before = prevD - prevLayer, after = d - layer;
+                float t = before / (before - after + 1e-5f);
+                t = t < 0 ? 0 : (t > 1 ? 1 : t);
+                float hit = prevLayer + (layer - prevLayer) * t;
+                float sx = px - ox * (hit - 0.5f), sy = py - oy * (hit - 0.5f);
                 if (sx < 0) sx = 0;
                 if (sy < 0) sy = 0;
                 if (sx > cw - 1.001f) sx = cw - 1.001f;
@@ -340,10 +351,10 @@ static AULockMaterial *materialOf(AUArtwork *artwork, BOOL moving) {
     BOOL subject = AUEnabled(AUKeyCutout) && artwork.cutout && artwork.background;
     BOOL depth = moving && AUEnabled(AUKeyDepth) && artwork.depth;
     material.color = subject ? artwork.background : artwork.source;
-    material.depth = depth ? (artwork.softDepth ?: artwork.depth) : nil;
+    material.depth = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth) : nil;
     material.subject = subject ? artwork.cutout : nil;
     material.moving = depth;
-    material.signature = [NSString stringWithFormat:@"%@|%d%d|%d|v3", artwork.key, depth, subject, artwork.upscaled];
+    material.signature = [NSString stringWithFormat:@"%@|%d%d|%d|v4", artwork.key, depth, subject, artwork.upscaled];
     return material;
 }
 
@@ -449,7 +460,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
             NSString *name = [NSString stringWithFormat:@"%@-%.0fx%.0f.mp4", AUSHA1(material.signature), size.width, size.height];
             file = [clipFolder() URLByAppendingPathComponent:name];
         };
-        NSString *artworkID = [NSString stringWithFormat:@"aura-%@-%ld-v3", AUSHA1(uri), (long)mode];
+        NSString *artworkID = [NSString stringWithFormat:@"aura-%@-%ld-v4", AUSHA1(uri), (long)mode];
         MPMediaItemAnimatedArtwork *artwork = [[artworkClass alloc] initWithArtworkID:artworkID
             previewImageRequestHandler:^(CGSize wanted, void (^completion)(UIImage *)) {
                 dispatch_async(clipQueue(), ^{

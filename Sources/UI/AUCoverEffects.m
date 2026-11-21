@@ -11,8 +11,8 @@
 
 static const CGFloat kCoverMinWidth = 200;
 static const CGFloat kStepOut = 1.07;            // the subject's scale over the cover, from its foot (the cover only)
-static const CGFloat kMaxTilt = 0.22;            // gravity change (≈ radians) for a full shift
-static const CGFloat kStrength = 0.04;           // a full tilt moves a layer at depth d by kStrength * side * (d - 0.5)
+static const CGFloat kMaxTilt = 0.30;            // gravity change (≈ radians) for a full shift
+static const CGFloat kStrength = 0.03;           // a full tilt moves a layer at depth d by kStrength * side * (d - 0.5)
 static const CFTimeInterval kSubjectWait = 0.35; // how long a cover with a subject still to come waits for it
 
 typedef NS_ENUM(NSInteger, AUSurfaceKind) {
@@ -545,9 +545,10 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
     for (AUSurface *surface in surfaces) {
         if (surface.content == artwork && surface.contentDepth == depth && surface.contentSubject == subject) continue;
         changed = YES;
-        // The depth heavily softened, always: a map with edges would tear the picture along them.
+        // The depth as the model gave it (lightly smoothed), so a face moves whole; softened only under a lifted
+        // subject, whose outline would otherwise tear the filled-in background.
         UIImage *color = subject ? artwork.background : artwork.source;
-        UIImage *map = depth ? (artwork.softDepth ?: artwork.depth) : nil;
+        UIImage *map = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth) : nil;
         [surface.renderer setColor:color.CGImage depth:map.CGImage];
         [CATransaction begin];
         [CATransaction setDisableActions:YES];

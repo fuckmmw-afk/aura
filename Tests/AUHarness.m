@@ -104,10 +104,23 @@ int main(int argc, const char *argv[]) {
             // The app's look: the Metal warp by the softened depth, the subject over it on the same zoomed rectangle.
             {
                 AUParallaxRenderer *renderer = [AUParallaxRenderer new];
-                CGImageRef map = soft ?: depth;
+                CGImageRef map = cut.background && soft ? soft : depth;
                 [renderer setColor:cut.background ?: cover depth:map];
-                renderer.zoom = 1 + 1.1 * 0.04;
-                renderer.strength = 0.04;
+                renderer.zoom = 1 + 1.1 * 0.03;
+                renderer.strength = 0.03;
+                // Without the subject lifted too (the cutout switched off): the cover alone moving by its depth.
+                {
+                    AUParallaxRenderer *plain = [AUParallaxRenderer new];
+                    [plain setColor:cover depth:depth];
+                    plain.zoom = renderer.zoom;
+                    plain.strength = 0.03;
+                    for (int i = 0; i < 2; i++) {
+                        plain.tilt = i ? CGPointMake(1, 0.6) : CGPointMake(-1, -0.3);
+                        CGImageRef frame = [plain renderImageWidth:402 height:546];
+                        save(frame, [NSString stringWithFormat:@"%@-6-plain-%d.png", name, i]);
+                        if (frame) CGImageRelease(frame);
+                    }
+                }
                 CGSize sizes[2] = {{600, 600}, {402, 546}};
                 for (int k = 0; k < 2; k++) {
                     for (int i = 0; i < 2; i++) {
@@ -122,7 +135,7 @@ int main(int argc, const char *argv[]) {
                         CGColorSpaceRelease(space);
                         CGContextDrawImage(c, CGRectMake(0, 0, size.width, size.height), frame);
                         if (cut.cutout) {
-                            double side = MAX(size.width, size.height) * renderer.zoom, amount = 0.04 * side * (AUSubjectDepth - 0.5);
+                            double side = MAX(size.width, size.height) * renderer.zoom, amount = 0.03 * side * (AUSubjectDepth - 0.5);
                             CGContextDrawImage(c, CGRectMake((size.width - side) / 2 + tilt.x * amount, (size.height - side) / 2 - tilt.y * amount, side, side), cut.cutout);
                         }
                         CGImageRef shot = CGBitmapContextCreateImage(c);
@@ -135,7 +148,7 @@ int main(int argc, const char *argv[]) {
             }
             // The lock screen's 3D flight: a 6 s loop, 3:4, as the phone would write it.
             {
-                AULockClipInput input = {cut.background ?: cover, soft ?: depth, cut.cutout};
+                AULockClipInput input = {cut.background ?: cover, cut.background && soft ? soft : depth, cut.cutout};
                 CGSize size = CGSizeMake(896, 1200);
                 for (int i = 0; i < 2; i++) {
                     CGImageRef frame = AULockClipFrame(input, size, i * 0.25, YES);

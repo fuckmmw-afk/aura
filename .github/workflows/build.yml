@@ -40,7 +40,7 @@ jobs:
           AURA_MODELS_URL: ${{ secrets.AURA_MODELS_URL }}
         run: |
           test -n "$AURA_MODELS_URL" || { echo "::error::AURA_MODELS_URL secret is not set"; exit 1; }
-          gmake -j4 FINALPACKAGE=1 AURA_VERSION="0.4.1-${GITHUB_SHA::7}" AURA_MODELS_URL="$AURA_MODELS_URL"
+          gmake -j4 FINALPACKAGE=1 AURA_VERSION="0.4.2-${GITHUB_SHA::7}" AURA_MODELS_URL="$AURA_MODELS_URL"
 
       - name: Check the dylib
         run: |

@@ -21,11 +21,24 @@ fragment half4 au_fragment(VOut in [[stage_in]], texture2d<half> color [[texture
     // The layer's point in the picture: aspect-filled, then zoomed in around the middle.\n\
     float2 uv = (in.uv - 0.5) * u.uvScale / u.zoom + 0.5;\n\
     if (u.hasDepth < 0.5) return half4(color.sample(s, uv).rgb, 1);\n\
-    // A smooth warp: each point moves by its (heavily softened) depth, near with the tilt, far against it. The\n\
-    // depth has no edges, so the picture bends without tearing and nothing is shown twice.\n\
+    // Steep parallax: a point at depth d (1 near, 0 far) shows shifted by off * (d - 0.5), found by marching down\n\
+    // through the map from the near plane, so each thing moves whole at its own depth and the near hides the far.\n\
     float2 off = u.tilt * u.strength;\n\
-    float d = float(depth.sample(s, uv).r);\n\
-    return half4(color.sample(s, uv - off * (d - 0.5)).rgb, 1);\n\
+    const int steps = 16;\n\
+    float layer = 1.0, stepSize = 1.0 / steps;\n\
+    float2 p = uv - off * (layer - 0.5);\n\
+    float d = float(depth.sample(s, p).r);\n\
+    float prevLayer = layer, prevD = d;\n\
+    for (int i = 0; i < steps && d < layer; i++) {\n\
+        prevLayer = layer; prevD = d;\n\
+        layer -= stepSize;\n\
+        p = uv - off * (layer - 0.5);\n\
+        d = float(depth.sample(s, p).r);\n\
+    }\n\
+    float before = prevD - prevLayer, after = d - layer;\n\
+    float t = clamp(before / (before - after + 1e-5), 0.0, 1.0);\n\
+    float hit = mix(prevLayer, layer, t);\n\
+    return half4(color.sample(s, uv - off * (hit - 0.5)).rgb, 1);\n\
 }\n";
 
 typedef struct {
