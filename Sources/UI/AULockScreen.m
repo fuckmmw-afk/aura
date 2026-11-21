@@ -12,7 +12,7 @@
 #import "Features/AUPipeline.h"
 #endif
 
-static const int32_t kFPS = 30, kLoopSeconds = 6;
+static const int32_t kFPS = 24, kLoopSeconds = 6;
 static const double kStrength = 0.03;
 
 #pragma mark - the clip, on the CPU
@@ -123,7 +123,7 @@ static void warp(AUClipLayers *l, uint8_t *pixels, size_t rowBytes, CGPoint tilt
                     long ix = lroundf(qx), iy = lroundf(qy); \
                     if (ix < 0) ix = 0; if (iy < 0) iy = 0; if (ix >= (long)cw) ix = cw - 1; if (iy >= (long)ch) iy = ch - 1; \
                     depth[iy * cw + ix] / 255.0f; })
-                const int steps = 16;
+                const int steps = 12;
                 float layer = 1, step = 1.0f / steps, d = DEPTH_AT(layer), prevLayer = layer, prevD = d;
                 for (int i = 0; i < steps && d < layer; i++) {
                     prevLayer = layer;
@@ -485,6 +485,18 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
                     completion(ready ? file : nil);
                 });
             }];
+        // Made at once in the background, so it is usually ready before the phone is locked; a request that comes
+        // first waits for it on the same queue.
+        NSString *uriNow = uri;
+        dispatch_async(clipQueue(), ^{
+            prepare();
+            if (file && ![NSFileManager.defaultManager fileExistsAtPath:file.path]) {
+                AULockClipInput input = {material.color.CGImage, material.depth.CGImage, material.subject.CGImage};
+                AULockClipWrite(file, input, size, material.moving);
+                pruneClips();
+                AULog(@"lock screen: clip for %@ made ahead", [uriNow substringFromIndex:uriNow.length > 8 ? uriNow.length - 8 : 0]);
+            }
+        });
         setExtras(@"motion", @{key: artwork}, title);
         AULog(@"lock screen: %@ offered for \"%@\"", moving ? @"3D flight" : @"stretched cover", title);
     }
