@@ -11,6 +11,9 @@ CGImageRef _Nullable AUDepthMap(CGImageRef image, NSString *_Nullable *_Nullable
 // The depth map heavily softened: for a background whose subject was lifted out, so its parallax warps smoothly
 // instead of tearing where the subject's outline was.
 CGImageRef _Nullable AUSoftenedDepth(CGImageRef depth) CF_RETURNS_RETAINED;
+// Lightly softened (a tent a 24th of the side): things stay whole, the steps between them become slopes, so a strong
+// parallax stretches nothing along an edge.
+CGImageRef _Nullable AUEasedDepth(CGImageRef depth) CF_RETURNS_RETAINED;
 
 typedef struct {
     CGImageRef _Nullable cutout;       // the subject alone, RGBA, the cover's size

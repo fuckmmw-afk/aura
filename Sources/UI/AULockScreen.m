@@ -13,7 +13,7 @@
 #endif
 
 static const int32_t kFPS = 24, kLoopSeconds = 6;
-static const double kStrength = 0.03;
+static const double kStrength = 0.05;
 
 #pragma mark - the clip, on the CPU
 //
@@ -351,10 +351,10 @@ static AULockMaterial *materialOf(AUArtwork *artwork, BOOL moving) {
     BOOL subject = AUEnabled(AUKeyCutout) && artwork.cutout && artwork.background;
     BOOL depth = moving && AUEnabled(AUKeyDepth) && artwork.depth;
     material.color = subject ? artwork.background : artwork.source;
-    material.depth = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth) : nil;
+    material.depth = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : (artwork.easedDepth ?: artwork.depth)) : nil;
     material.subject = subject ? artwork.cutout : nil;
     material.moving = depth;
-    material.signature = [NSString stringWithFormat:@"%@|%d%d|%d|v4", artwork.key, depth, subject, artwork.upscaled];
+    material.signature = [NSString stringWithFormat:@"%@|%d%d|%d|v5", artwork.key, depth, subject, artwork.upscaled];
     return material;
 }
 
@@ -460,7 +460,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
             NSString *name = [NSString stringWithFormat:@"%@-%.0fx%.0f.mp4", AUSHA1(material.signature), size.width, size.height];
             file = [clipFolder() URLByAppendingPathComponent:name];
         };
-        NSString *artworkID = [NSString stringWithFormat:@"aura-%@-%ld-v4", AUSHA1(uri), (long)mode];
+        NSString *artworkID = [NSString stringWithFormat:@"aura-%@-%ld-v5", AUSHA1(uri), (long)mode];
         MPMediaItemAnimatedArtwork *artwork = [[artworkClass alloc] initWithArtworkID:artworkID
             previewImageRequestHandler:^(CGSize wanted, void (^completion)(UIImage *)) {
                 dispatch_async(clipQueue(), ^{

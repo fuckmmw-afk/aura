@@ -254,13 +254,16 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
         }
         if (depth) {
             UIImage *depthImage = [UIImage imageWithCGImage:depth];
-            CGImageRef soft = AUSoftenedDepth(depth);
+            CGImageRef soft = AUSoftenedDepth(depth), eased = AUEasedDepth(depth);
             UIImage *softImage = soft ? [UIImage imageWithCGImage:soft] : depthImage;
+            UIImage *easedImage = eased ? [UIImage imageWithCGImage:eased] : depthImage;
             if (soft) CGImageRelease(soft);
+            if (eased) CGImageRelease(eased);
             CGImageRelease(depth);
             [self deliver:artwork generation:generation apply:^{
                 artwork.depth = depthImage;
                 artwork.softDepth = softImage;
+                artwork.easedDepth = easedImage;
             }];
         }
     }

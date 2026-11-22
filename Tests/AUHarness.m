@@ -106,14 +106,16 @@ int main(int argc, const char *argv[]) {
                 AUParallaxRenderer *renderer = [AUParallaxRenderer new];
                 CGImageRef map = cut.background && soft ? soft : depth;
                 [renderer setColor:cut.background ?: cover depth:map];
-                renderer.zoom = 1 + 1.1 * 0.03;
-                renderer.strength = 0.03;
+                renderer.zoom = 1 + 1.1 * 0.05;
+                renderer.strength = 0.05;
                 // Without the subject lifted too (the cutout switched off): the cover alone moving by its depth.
                 {
                     AUParallaxRenderer *plain = [AUParallaxRenderer new];
-                    [plain setColor:cover depth:depth];
+                    CGImageRef eased = depth ? AUEasedDepth(depth) : NULL;
+                    [plain setColor:cover depth:eased ?: depth];
+                    if (eased) CGImageRelease(eased);
                     plain.zoom = renderer.zoom;
-                    plain.strength = 0.03;
+                    plain.strength = 0.05;
                     for (int i = 0; i < 2; i++) {
                         plain.tilt = i ? CGPointMake(1, 0.6) : CGPointMake(-1, -0.3);
                         CGImageRef frame = [plain renderImageWidth:402 height:546];
@@ -135,7 +137,7 @@ int main(int argc, const char *argv[]) {
                         CGColorSpaceRelease(space);
                         CGContextDrawImage(c, CGRectMake(0, 0, size.width, size.height), frame);
                         if (cut.cutout) {
-                            double side = MAX(size.width, size.height) * renderer.zoom, amount = 0.03 * side * (AUSubjectDepth - 0.5);
+                            double side = MAX(size.width, size.height) * renderer.zoom, amount = 0.05 * side * (AUSubjectDepth - 0.5);
                             CGContextDrawImage(c, CGRectMake((size.width - side) / 2 + tilt.x * amount, (size.height - side) / 2 - tilt.y * amount, side, side), cut.cutout);
                         }
                         CGImageRef shot = CGBitmapContextCreateImage(c);

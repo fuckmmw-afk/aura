@@ -49,7 +49,7 @@ UIViewController *AUSettingsPage(void) {
     SGModRow *depth = AURowSwitch(@"Живые обложки", @"Карта глубины и гироскоп: обложка как 3D-открытка", AUKeyDepth);
     depth.changed = ^(BOOL on) { AUSettingsChanged(); };
     ADD(cover, AURowSymbol(depth, @"cube.transparent"));
-    SGModRow *strength = AURowSlider(@"Сила параллакса", nil, 0.3, 2.0, 0.1, ^double { return AUNumber(AUKeyDepthStrength, 1.0); },
+    SGModRow *strength = AURowSlider(@"Сила параллакса", nil, 0.3, 3.0, 0.1, ^double { return AUNumber(AUKeyDepthStrength, 1.0); },
                                      ^(double value) { AUSetNumber(AUKeyDepthStrength, value); },
                                      ^NSString *(double value) { return [NSString stringWithFormat:@"×%.1f", value]; });
     ADD(cover, strength);

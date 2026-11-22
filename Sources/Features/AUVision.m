@@ -115,18 +115,26 @@ CGImageRef AUDepthMap(CGImageRef image, NSString **error) {
     return map;
 }
 
-CGImageRef AUSoftenedDepth(CGImageRef depth) {
+static CGImageRef softened(CGImageRef depth, size_t divisor, int passes) {
     NSData *bytes = AUGrayBytes(depth);
     if (!bytes) return NULL;
     size_t w = CGImageGetWidth(depth), h = CGImageGetHeight(depth);
     NSMutableData *a = [bytes mutableCopy], *b = [NSMutableData dataWithLength:w * h];
     vImage_Buffer src = {a.mutableBytes, h, w, w}, dst = {b.mutableBytes, h, w, w};
-    uint32_t side = (uint32_t)(MAX(w, h) / 10) | 1;
-    for (int pass = 0; pass < 2; pass++) {
+    uint32_t side = (uint32_t)(MAX(w, h) / divisor) | 1;
+    for (int pass = 0; pass < passes; pass++) {
         vImageTentConvolve_Planar8(&src, &dst, NULL, 0, 0, side, side, 0, kvImageEdgeExtend);
         vImageTentConvolve_Planar8(&dst, &src, NULL, 0, 0, side, side, 0, kvImageEdgeExtend);
     }
     return AUGrayImage(a.bytes, w, h);
+}
+
+CGImageRef AUSoftenedDepth(CGImageRef depth) {
+    return softened(depth, 10, 2);
+}
+
+CGImageRef AUEasedDepth(CGImageRef depth) {
+    return softened(depth, 24, 1);
 }
 
 #pragma mark - cutout

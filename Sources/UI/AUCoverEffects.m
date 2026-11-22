@@ -11,8 +11,8 @@
 
 static const CGFloat kCoverMinWidth = 200;
 static const CGFloat kStepOut = 1.07;            // the subject's scale over the cover, from its foot (the cover only)
-static const CGFloat kMaxTilt = 0.30;            // gravity change (≈ radians) for a full shift
-static const CGFloat kStrength = 0.03;           // a full tilt moves a layer at depth d by kStrength * side * (d - 0.5)
+static const CGFloat kMaxTilt = 0.17;            // gravity change (≈ radians) for a full shift
+static const CGFloat kStrength = 0.05;           // a full tilt moves a layer at depth d by kStrength * side * (d - 0.5)
 static const CFTimeInterval kSubjectWait = 0.35; // how long a cover with a subject still to come waits for it
 
 typedef NS_ENUM(NSInteger, AUSurfaceKind) {
@@ -548,7 +548,7 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
         // The depth as the model gave it (lightly smoothed), so a face moves whole; softened only under a lifted
         // subject, whose outline would otherwise tear the filled-in background.
         UIImage *color = subject ? artwork.background : artwork.source;
-        UIImage *map = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth) : nil;
+        UIImage *map = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : (artwork.easedDepth ?: artwork.depth)) : nil;
         [surface.renderer setColor:color.CGImage depth:map.CGImage];
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -661,7 +661,7 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
             _refSet = YES;
         }
         double dt = MIN(0.1, MAX(1.0 / 120, link.targetTimestamp - link.timestamp));
-        double follow = 1 - exp(-dt / 3.0);
+        double follow = 1 - exp(-dt / 6.0);
         _refX += (gx - _refX) * follow;
         _refY += (gy - _refY) * follow;
         CGFloat tx = (CGFloat)MAX(-1.0, MIN(1.0, (gx - _refX) / kMaxTilt));
