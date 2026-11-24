@@ -88,26 +88,26 @@ def test_upscale(root):
 
 
 def test_inpaint(root):
-    package = fetch("lama-512", root)
-    model = ct.models.MLModel(package, compute_units=ct.ComputeUnit.CPU_AND_NE)
+    package = fetch("lama-256", root)
+    model = ct.models.MLModel(package, compute_units=ct.ComputeUnit.CPU_ONLY)
     # A smooth gradient with a hole: the filled hole must continue the gradient, not stay black.
-    xs = np.linspace(0, 255, 512, dtype=np.float32)
-    img = np.stack([np.tile(xs, (512, 1)), np.tile(xs[::-1], (512, 1)), np.full((512, 512), 128, np.float32)], -1).astype(np.uint8)
+    xs = np.linspace(0, 255, 256, dtype=np.float32)
+    img = np.stack([np.tile(xs, (256, 1)), np.tile(xs[::-1], (256, 1)), np.full((256, 256), 128, np.float32)], -1).astype(np.uint8)
     holed = img.copy()
-    holed[200:300, 150:250] = 0
-    mask = np.zeros((512, 512), np.uint8)
-    mask[200:300, 150:250] = 255
+    holed[100:150, 75:125] = 0
+    mask = np.zeros((256, 256), np.uint8)
+    mask[100:150, 75:125] = 255
     out, ms = timed(model, {"image": Image.fromarray(holed), "mask": Image.fromarray(mask, "L")}, runs=3)
     filled = np.asarray(out["filled"].convert("RGB"), dtype=np.float32)
-    err = np.abs(filled[200:300, 150:250] - img[200:300, 150:250].astype(np.float32)).mean()
-    check(filled.shape == (512, 512, 3), f"inpaint: output {filled.shape}")
+    err = np.abs(filled[100:150, 75:125] - img[100:150, 75:125].astype(np.float32)).mean()
+    check(filled.shape == (256, 256, 3), f"inpaint: output {filled.shape}")
     check(err < 40, f"inpaint: the hole continues the picture (mean error {err:.1f} of 255)")
-    print(f"     inpaint: {ms:.0f} ms a 512x512 canvas on this Mac")
+    print(f"     inpaint: {ms:.0f} ms a 256x256 canvas on this Mac")
     # A big hole in a flat dark-blue field must come back dark blue, not tinted (as per-channel int8 made it).
-    field = np.zeros((512, 512, 3), np.uint8)
+    field = np.zeros((256, 256, 3), np.uint8)
     field[...] = (25, 24, 40)
-    big = np.zeros((512, 512), np.uint8)
-    big[100:450, 120:400] = 255
+    big = np.zeros((256, 256), np.uint8)
+    big[50:225, 60:200] = 255
     holed = field.copy()
     holed[big > 0] = 0
     out = model.predict({"image": Image.fromarray(holed), "mask": Image.fromarray(big, "L")})

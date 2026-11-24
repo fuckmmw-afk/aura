@@ -17,7 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy) NSArray<AUSceneLayer *> *layers;  // far to near
 @property (nonatomic) double backgroundDepth;
 @property (nonatomic) BOOL inpainted;                         // painted by the model, not the quick fallback
-// How far a layer moves against the background for a full tilt, as a share of the strength: 0.25 ... 1 by its depth.
+// How far a layer moves with the tilt, as a share of the strength: 0.5 ... 1 by its depth (the background moves against it).
 - (double)weightOf:(AUSceneLayer *)layer;
 // The canvas's square (the cover's own frame) cut out of the background and each layer, for the cover view.
 - (nullable UIImage *)squareOf:(UIImage *)image;

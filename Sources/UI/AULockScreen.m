@@ -13,7 +13,7 @@
 #endif
 
 static const int32_t kFPS = 30, kLoopSeconds = 6;
-static const double kStrength = 0.05, kBackgroundShare = 0.25;
+static const double kStrength = 0.07, kBackgroundShare = 0.35;
 
 #pragma mark - the clip, on the CPU
 //

@@ -67,7 +67,7 @@ static const NSTimeInterval kIdleUnload = 300;
     inpaint.title = @"Big-LaMa (дорисовка)";
     inpaint.license = @"Apache-2.0 · advimman/lama";
     inpaint.approximateSize = 52000000;
-    inpaint.idle = 30;   // big: let go as soon as the cover is done
+    inpaint.idle = 90;
     depth.idle = kIdleUnload;
     upscale.idle = kIdleUnload;
     _entries = @{depth.modelID: depth, upscale.modelID: upscale, inpaint.modelID: inpaint};
@@ -331,10 +331,10 @@ static const NSTimeInterval kIdleUnload = 300;
     }
     CFTimeInterval started = CACurrentMediaTime();
     MLModelConfiguration *configuration = [MLModelConfiguration new];
-    // CPU and Neural Engine for all: LaMa's Fourier matrices carry their own scale now, so its fp16 sums stay small
-    // (summed first and scaled after they overflowed into noise on the phone); the GPU is not there for a
-    // backgrounded app, which is when a locked phone moves to the next track.
-    configuration.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
+    // LaMa on the CPU: for the Neural Engine it took minutes to compile, seconds to load each time and over a
+    // gigabyte; at 256 px on the CPU it loads at once and stays small. The rest on CPU and Neural Engine (the GPU is
+    // not there for a backgrounded app, which is when a locked phone moves to the next track).
+    configuration.computeUnits = [modelID isEqualToString:AUModelInpaint] ? MLComputeUnitsCPUOnly : MLComputeUnitsCPUAndNeuralEngine;
     NSError *error = nil;
     model = [MLModel modelWithContentsOfURL:[self compiledURL:entry] configuration:configuration error:&error];
     if (!model) {

@@ -40,9 +40,9 @@ static CGImageRef squareFrame(AUScene *scene, CGPoint tilt, size_t side) {
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGContextRef c = CGBitmapContextCreate(NULL, side, side, 8, 0, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
     CGColorSpaceRelease(space);
-    double zoom = 1 + 2.2 * 0.25 * 0.04, drawn = side * zoom, off = (side - drawn) / 2, s = 0.04 * drawn;
+    double zoom = 1 + 2.2 * 0.35 * 0.07, drawn = side * zoom, off = (side - drawn) / 2, s = 0.07 * drawn;
     CGImageRef back = [scene squareOf:scene.background].CGImage;
-    CGContextDrawImage(c, CGRectMake(off - tilt.x * 0.25 * s, off + tilt.y * 0.25 * s, drawn, drawn), back);
+    CGContextDrawImage(c, CGRectMake(off - tilt.x * 0.35 * s, off + tilt.y * 0.35 * s, drawn, drawn), back);
     for (AUSceneLayer *layer in scene.layers) {
         double w = [scene weightOf:layer] * s;
         CGContextDrawImage(c, CGRectMake(off + tilt.x * w, off - tilt.y * w, drawn, drawn), [scene squareOf:layer.image].CGImage);
@@ -57,9 +57,9 @@ static CGImageRef fillFrame(AUScene *scene, CGPoint tilt, CGSize size) {
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGContextRef c = CGBitmapContextCreate(NULL, (size_t)size.width, (size_t)size.height, 8, 0, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
     CGColorSpaceRelease(space);
-    double zoom = 1 + 2.2 * 0.25 * 0.04, drawn = MAX(size.width, size.height) * zoom, s = 0.04 * drawn;
+    double zoom = 1 + 2.2 * 0.35 * 0.07, drawn = MAX(size.width, size.height) * zoom, s = 0.07 * drawn;
     double ox = (size.width - drawn) / 2, oy = (size.height - drawn) / 2;
-    CGContextDrawImage(c, CGRectMake(ox - tilt.x * 0.25 * s, oy + tilt.y * 0.25 * s, drawn, drawn), scene.background.CGImage);
+    CGContextDrawImage(c, CGRectMake(ox - tilt.x * 0.35 * s, oy + tilt.y * 0.35 * s, drawn, drawn), scene.background.CGImage);
     for (AUSceneLayer *layer in scene.layers) {
         double w = [scene weightOf:layer] * s;
         CGContextDrawImage(c, CGRectMake(ox + tilt.x * w, oy - tilt.y * w, drawn, drawn), layer.image.CGImage);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Big-LaMa (advimman/lama, Apache-2.0) -> Core ML, one fixed 512 x 512 canvas, fp16 with the Fourier
+"""Big-LaMa (advimman/lama, Apache-2.0) -> Core ML, one fixed 256 x 256 canvas, fp16 with the Fourier
 matrices pre-scaled so no sum overflows.
 
 LaMa's Fourier units use torch.fft.rfftn / irfftn. At a fixed size they are exact matrix products with the discrete
@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 
 LAMA, WEIGHTS, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
-W, H = 512, 512
+W, H = 256, 256
 sys.path.insert(0, LAMA)
 import types  # noqa: E402
 for name in ('pytorch_lightning',):
@@ -144,7 +144,7 @@ def main():
     model = Wrapped(net).eval()
     img = torch.rand(1, 3, H, W)
     mask = torch.zeros(1, 1, H, W)
-    mask[..., 100:300, 100:250] = 1
+    mask[..., 60:180, 60:160] = 1
     record_shapes(model, img, mask)
     with torch.no_grad():
         traced = torch.jit.trace(model, (img, mask))
@@ -163,7 +163,7 @@ def main():
     # linear int8 tinted big holes blue-green; palettes keep the fill's colour.)
     config = cto.OptimizationConfig(global_config=cto.OpPalettizerConfig(mode='kmeans', nbits=8, weight_threshold=8192))
     mlmodel = cto.palettize_weights(mlmodel, config)
-    mlmodel.short_description = 'Big-LaMa inpainting (advimman/lama, Apache-2.0), 512x512, fp16, scaled Fourier matrices, 8-bit palettized'
+    mlmodel.short_description = 'Big-LaMa inpainting (advimman/lama, Apache-2.0), 256x256, fp16, scaled Fourier matrices, 8-bit palettized'
     mlmodel.license = 'Apache-2.0'
     mlmodel.save(OUT)
     print('saved', OUT)

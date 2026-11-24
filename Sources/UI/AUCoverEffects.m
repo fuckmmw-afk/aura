@@ -9,9 +9,9 @@
 
 static const CGFloat kCoverMinWidth = 200;
 static const CGFloat kStepOut = 1.06;            // the objects' scale over the cover, from its foot (the cover only)
-static const CGFloat kMaxTilt = 0.20;            // gravity change (≈ radians) for a full tilt
-static const CGFloat kStrength = 0.04;           // a full tilt moves the nearest object kStrength * side against the background
-static const CGFloat kBackgroundShare = 0.25;    // the background's own move, against the tilt, as a share of that
+static const CGFloat kMaxTilt = 0.15;            // gravity change (≈ radians) for a full tilt
+static const CGFloat kStrength = 0.07;           // a full tilt moves the nearest object kStrength * side against the background
+static const CGFloat kBackgroundShare = 0.35;    // the background's own move, against the tilt, as a share of that
 
 typedef NS_ENUM(NSInteger, AUSurfaceKind) {
     AUSurfaceCover,
@@ -174,8 +174,9 @@ static UIView *taurusField(void) {
     return field ? field() : nil;
 }
 
+// Taurus draws the same field behind playlists, albums, artists and its settings' preview: only the player's counts.
 - (CALayer *)fillLayerShowing {
-    UIView *field = _field ?: taurusField();
+    UIView *field = taurusField();
     if (!field || !showing(field)) return nil;
     CALayer *fill = ivarLayer(field, "_fill");
     if (!fill || fill.hidden || fill.bounds.size.width < 1) return nil;
@@ -193,6 +194,7 @@ static UIView *taurusField(void) {
 }
 
 - (void)fieldLaidOut:(UIView *)field {
+    if (field != taurusField()) return;
     _field = field;
     [self layoutFill];
     [self schedulePick];

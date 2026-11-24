@@ -13,7 +13,7 @@ static NSString *const kVersion = @"scene-v1";
 - (double)weightOf:(AUSceneLayer *)layer {
     double span = MAX(0.05, 1 - _backgroundDepth);
     double relative = MIN(1, MAX(0, (layer.depth - _backgroundDepth) / span));
-    return 0.25 + 0.75 * relative;
+    return 0.5 + 0.5 * relative;
 }
 
 - (UIImage *)squareOf:(UIImage *)image {

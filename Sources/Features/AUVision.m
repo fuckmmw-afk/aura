@@ -722,7 +722,8 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     MLModel *lama = [AUModelManager.shared modelFor:AUModelInpaint];
     if (lama) {
         double t = AUNowMs();
-        CGRect squareIn = CGRectMake(0, 0, 512, 512);
+        MLImageConstraint *size = lama.modelDescription.inputDescriptionsByName[@"image"].imageConstraint;
+        CGRect squareIn = CGRectMake(0, 0, size.pixelsWide, size.pixelsHigh);
         CGImageRef painted = lamaFill(lama, square, g, side, side, squareIn, &why);
         if (painted) {
             CGContextDrawImage(canvas, CGRectMake(0, 0, cw, ch), painted);
