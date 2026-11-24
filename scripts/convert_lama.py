@@ -155,12 +155,15 @@ def main():
                 ct.ImageType(name='mask', shape=mask.shape, scale=1 / 255.0, color_layout=ct.colorlayout.GRAYSCALE)],
         outputs=[ct.ImageType(name='filled', color_layout=ct.colorlayout.RGB)],
         compute_precision=ct.precision.FLOAT32,
-        minimum_deployment_target=ct.target.iOS17,
+        minimum_deployment_target=ct.target.iOS18,
         convert_to='mlprogram',
     )
     import coremltools.optimize.coreml as cto
-    # 8-bit weights, per channel, only for the convolutions: the Fourier matrices (64 x 64 at most) stay exact.
-    config = cto.OptimizationConfig(global_config=cto.OpLinearQuantizerConfig(mode='linear_symmetric', weight_threshold=8192))
+    # 8-bit weights in blocks of 32 input channels, only for the convolutions (the Fourier matrices stay exact).
+    # Per channel was too coarse: big holes came out tinted (checked in PyTorch: a blue-green cast); blocks of 32 keep
+    # the fill's colour.
+    config = cto.OptimizationConfig(global_config=cto.OpLinearQuantizerConfig(
+        mode='linear_symmetric', granularity='per_block', block_size=32, weight_threshold=8192))
     mlmodel = cto.linear_quantize_weights(mlmodel, config)
     mlmodel.short_description = 'Big-LaMa inpainting (advimman/lama, Apache-2.0), 512x512, fp32 compute, int8 weights'
     mlmodel.license = 'Apache-2.0'
