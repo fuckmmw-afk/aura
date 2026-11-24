@@ -11,7 +11,7 @@ TWEAK_NAME := Aura
 Aura_FILES := $(shell find Sources -name '*.m' -o -name '*.x')
 Aura_CFLAGS := -fobjc-arc -fvisibility=hidden -ISources -DAURA_VERSION='"$(AURA_VERSION)"' -DAURA_MODELS_URL='"$(AURA_MODELS_URL)"' \
 	-Wno-deprecated-declarations -Wno-unused-function
-Aura_FRAMEWORKS := Foundation UIKit QuartzCore CoreGraphics CoreImage CoreML Vision Metal CoreMotion Accelerate ImageIO CoreVideo AVFoundation CoreMedia MediaPlayer
+Aura_FRAMEWORKS := Foundation UIKit QuartzCore CoreGraphics CoreImage CoreML Vision CoreMotion Accelerate ImageIO CoreVideo AVFoundation CoreMedia MediaPlayer
 # The long Substrate install name: signers like ESign rewrite it in place and need the room.
 Aura_LDFLAGS := -Wl,-headerpad_max_install_names
 # No Substrate: plain Objective-C runtime swaps, which work on a sideloaded app without a jailbreak.

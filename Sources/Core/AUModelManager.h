@@ -8,6 +8,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 #define AUModelDepth @"depth-v2s-p8"     // Depth Anything V2 Small, 8-bit palettized (Apple, Apache-2.0)
 #define AUModelUpscale @"esrgan-x4v3"    // Real-ESRGAN realesr-general-x4v3, 128px tiles (BSD-3-Clause)
+#define AUModelInpaint @"lama-384x512-p8" // Big-LaMa inpainting, 384 x 512, 8-bit palettized (Apache-2.0)
 
 typedef NS_ENUM(NSInteger, AUModelState) {
     AUModelMissing,

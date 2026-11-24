@@ -18,6 +18,7 @@ static const NSTimeInterval kIdleUnload = 300;
 @property (nonatomic, copy) NSString *lastError;
 @property (nonatomic, strong) MLModel *loaded;
 @property (nonatomic) CFTimeInterval lastUse;
+@property (nonatomic) NSTimeInterval idle;   // unloaded after this long unused
 @end
 
 @implementation AUModelEntry
@@ -60,15 +61,24 @@ static const NSTimeInterval kIdleUnload = 300;
     upscale.title = @"Real-ESRGAN general x4v3";
     upscale.license = @"BSD-3-Clause · xinntao";
     upscale.approximateSize = 2492805;
-    _entries = @{depth.modelID: depth, upscale.modelID: upscale};
+    AUModelEntry *inpaint = [AUModelEntry new];
+    inpaint.modelID = AUModelInpaint;
+    inpaint.version = 1;
+    inpaint.title = @"Big-LaMa (дорисовка)";
+    inpaint.license = @"Apache-2.0 · advimman/lama";
+    inpaint.approximateSize = 52000000;
+    inpaint.idle = 30;   // big: let go as soon as the cover is done
+    depth.idle = kIdleUnload;
+    upscale.idle = kIdleUnload;
+    _entries = @{depth.modelID: depth, upscale.modelID: upscale, inpaint.modelID: inpaint};
     for (AUModelEntry *entry in _entries.allValues) {
         entry.state = [NSFileManager.defaultManager fileExistsAtPath:[self compiledURL:entry].path] ? AUModelReady : AUModelMissing;
     }
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(memoryWarning)
                                                name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
     dispatch_async(dispatch_get_main_queue(), ^{
-        self->_idleTimer = [NSTimer scheduledTimerWithTimeInterval:60 target:self selector:@selector(unloadIdle) userInfo:nil repeats:YES];
-        self->_idleTimer.tolerance = 20;
+        self->_idleTimer = [NSTimer scheduledTimerWithTimeInterval:15 target:self selector:@selector(unloadIdle) userInfo:nil repeats:YES];
+        self->_idleTimer.tolerance = 5;
     });
     return self;
 }
@@ -312,7 +322,8 @@ static const NSTimeInterval kIdleUnload = 300;
     }
     CFTimeInterval started = CACurrentMediaTime();
     MLModelConfiguration *configuration = [MLModelConfiguration new];
-    configuration.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
+    // LaMa's Fourier matrices are big matrix products: the GPU is let in for it.
+    configuration.computeUnits = [modelID isEqualToString:AUModelInpaint] ? MLComputeUnitsAll : MLComputeUnitsCPUAndNeuralEngine;
     NSError *error = nil;
     model = [MLModel modelWithContentsOfURL:[self compiledURL:entry] configuration:configuration error:&error];
     if (!model) {
@@ -341,13 +352,13 @@ static const NSTimeInterval kIdleUnload = 300;
     [_lock lock];
     NSMutableArray *dropped = [NSMutableArray array];
     for (AUModelEntry *entry in _entries.allValues) {
-        if (entry.loaded && now - entry.lastUse > kIdleUnload) {
+        if (entry.loaded && now - entry.lastUse > entry.idle) {
             entry.loaded = nil;
             [dropped addObject:entry.modelID];
         }
     }
     [_lock unlock];
-    if (dropped.count) AULog(@"models unloaded after %.0f s idle: %@", kIdleUnload, [dropped componentsJoinedByString:@", "]);
+    if (dropped.count) AULog(@"models unloaded when idle: %@", [dropped componentsJoinedByString:@", "]);
 }
 
 - (void)unloadAll {

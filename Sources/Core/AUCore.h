@@ -26,7 +26,8 @@ NSURL *AULogURL(void);
 #define AUKeyDepth @"aura.depth"
 #define AUKeyDepthStrength @"aura.depth.strength"
 #define AUKeyCutout @"aura.cutout"
-#define AUKeyCutoutObjects @"aura.cutout.objects" // off until switched on
+#define AUKeyCutoutObjects @"aura.cutout.objects" // (retired)
+#define AUKeyScenePeopleOnly @"aura.scene.peopleOnly" // off: every subject on the cover gets a layer
 #define AUKeyUpscale @"aura.upscale"
 
 BOOL AUEnabled(NSString *key);   // unset is on

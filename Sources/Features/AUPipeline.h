@@ -2,6 +2,7 @@
 // changes, kept on disk (Caches/Aura/Artwork) and the last few in memory. Nothing is worked out twice.
 #import <UIKit/UIKit.h>
 #import "AUPalette.h"
+#import "AUScene.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -14,13 +15,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL upscaled;
 @property (nonatomic) BOOL upscaleChecked;                    // upscaling was on when the source was made
 @property (nonatomic, strong, nullable) UIImage *depth;       // gray, near bright
-@property (nonatomic, strong, nullable) UIImage *softDepth;   // the same softened, under a lifted subject
-@property (nonatomic, strong, nullable) UIImage *easedDepth;  // lightly softened, for the parallax without a subject
-@property (nonatomic, strong, nullable) UIImage *cutout;      // the subject, RGBA, the source's size
-@property (nonatomic, strong, nullable) UIImage *background;  // the cover blurred, under the subject
-@property (nonatomic) CGRect subjectBounds;                   // 0...1, origin top left
-@property (nonatomic) BOOL noSubject;                         // looked for, none that reads
-@property (nonatomic) BOOL cutoutObjects;                     // looked for any subject, not only people
+@property (nonatomic, strong, nullable) AUScene *scene;       // the cover taken apart: objects on layers, background painted in
+@property (nonatomic) BOOL sceneChecked;                      // a scene was made (or could not be) with these settings
+@property (nonatomic) BOOL scenePeopleOnly;
 @property (nonatomic) CFTimeInterval arrived;                 // when the track's cover came, for the latency stat
 @end
 
