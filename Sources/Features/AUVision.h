@@ -1,7 +1,6 @@
 // The three model stages, each a plain function run on the pipeline's queue.
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
-#import "AUScene.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -32,11 +31,5 @@ void AUCutoutResultRelease(AUCutoutResult *result);
 // Real-ESRGAN x4 over 128 px tiles with an 8 px overlap, the seams cut halfway through each overlap; the result
 // scaled down to at most maxSide. nil when the model is not on the phone yet.
 CGImageRef _Nullable AUUpscaled(CGImageRef image, size_t maxSide, NSString *_Nullable *_Nullable error) CF_RETURNS_RETAINED;
-
-// The cover taken apart into a scene (AUScene.h): Vision's foreground subjects (with `peopleOnly`, those holding a
-// person) on layers of their own, each at its median depth, and the 3:4 background painted in under them and above
-// and below the cover by Big-LaMa, or by a quick blur fill while the model is not on the phone. Without subjects the
-// depth map's near part, when it stands out clearly, is the one layer. nil when the cover cannot be read.
-AUScene *_Nullable AUSceneBuild(CGImageRef cover, CGImageRef _Nullable depth, BOOL peopleOnly, NSString *_Nullable *_Nullable log);
 
 NS_ASSUME_NONNULL_END

@@ -162,25 +162,21 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
 
 - (void)work:(AUArtwork *)artwork image:(UIImage *)image {
     NSUInteger generation = ++_generation;
-    BOOL wantTheme = AUEnabled(AUKeyTheme), wantDepth = AUEnabled(AUKeyDepth), wantScene = AUEnabled(AUKeyDepth) || AUEnabled(AUKeyCutout);
-    BOOL wantUpscale = AUEnabled(AUKeyUpscale), peopleOnly = AUFlag(AUKeyScenePeopleOnly), throttled = AUThrottled();
-    BOOL lamaReady = [AUModelManager.shared stateOf:AUModelInpaint] == AUModelReady;
+    BOOL wantTheme = AUEnabled(AUKeyTheme), wantDepth = AUEnabled(AUKeyDepth), wantCutout = AUFlag(AUKeyPopOut);
+    BOOL wantUpscale = AUEnabled(AUKeyUpscale), objects = AUFlag(AUKeyCutoutObjects), throttled = AUThrottled();
     if (throttled) AULog(@"pipeline: hot (%@): the palette only", AUThermalName());
     BOOL needPalette = wantTheme && !artwork.palette;
     BOOL needSource = !artwork.source || (wantUpscale && !throttled && !artwork.upscaleChecked) || (!wantUpscale && artwork.upscaled);
-    BOOL needDepth = (wantDepth || wantScene) && !artwork.depth && !throttled;
-    BOOL needScene = wantScene && !throttled
-        && (!artwork.sceneChecked || artwork.scenePeopleOnly != peopleOnly || (artwork.scene && !artwork.scene.inpainted && lamaReady));
-    if (wantScene && !lamaReady) [AUModelManager.shared ensure:AUModelInpaint];
-    if (!needPalette && !needSource && !needDepth && !needScene) return;
+    BOOL needDepth = wantDepth && !artwork.depth && !throttled;
+    BOOL needCutout = wantCutout && !throttled && (artwork.cutoutObjects != objects || (!artwork.cutout && !artwork.noSubject));
+    if (!needPalette && !needSource && !needDepth && !needCutout) return;
     [self memoryStore:artwork];
     CGImageRef cgImage = CGImageRetain(image.CGImage);
     NSString *folder = [self folderFor:artwork];
-    UIImage *knownDepth = artwork.depth;
     dispatch_async(_work, ^{
         @autoreleasepool {
             [self runStages:artwork image:cgImage folder:folder generation:generation palette:needPalette upscale:wantUpscale && !throttled
-                      depth:needDepth knownDepth:knownDepth scene:needScene peopleOnly:peopleOnly];
+                      depth:needDepth cutout:needCutout objects:objects];
         }
         CGImageRelease(cgImage);
     });
@@ -193,8 +189,7 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
 }
 
 - (void)runStages:(AUArtwork *)artwork image:(CGImageRef)original folder:(NSString *)folder generation:(NSUInteger)generation
-          palette:(BOOL)needPalette upscale:(BOOL)wantUpscale depth:(BOOL)needDepth knownDepth:(UIImage *)knownDepth
-            scene:(BOOL)needScene peopleOnly:(BOOL)peopleOnly {
+          palette:(BOOL)needPalette upscale:(BOOL)wantUpscale depth:(BOOL)needDepth cutout:(BOOL)needCutout objects:(BOOL)objects {
     CFTimeInterval arrived = artwork.arrived;
     NSFileManager *files = NSFileManager.defaultManager;
     BOOL keep = artwork.exact;   // only the exact picture is stored under its key
@@ -203,6 +198,7 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
     if (!cover) return;
     CGImageRef source = CGImageRetain(cover);
     do {
+
     // 1. The palette, from the cover as it came: the theme moves at once.
     if (needPalette) {
         NSString *path = [folder stringByAppendingPathComponent:@"palette.plist"];
@@ -256,10 +252,9 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
     }
 
     // 3. Depth.
-    CGImageRef depth = knownDepth.CGImage ? CGImageRetain(knownDepth.CGImage) : NULL;
-    if (needDepth && !depth) {
+    if (needDepth) {
         NSString *path = [folder stringByAppendingPathComponent:@"depth.png"];
-        depth = keep ? AUImageFromData([NSData dataWithContentsOfFile:path]) : NULL;
+        CGImageRef depth = keep ? AUImageFromData([NSData dataWithContentsOfFile:path]) : NULL;
         if (!depth) {
             if ([self stale:generation]) break;
             double started = AUNowMs();
@@ -274,36 +269,67 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
         }
         if (depth) {
             UIImage *depthImage = [UIImage imageWithCGImage:depth];
-            [self deliver:artwork generation:generation apply:^{ artwork.depth = depthImage; }];
+            CGImageRef soft = AUSoftenedDepth(depth), eased = AUEasedDepth(depth);
+            UIImage *softImage = soft ? [UIImage imageWithCGImage:soft] : depthImage;
+            UIImage *easedImage = eased ? [UIImage imageWithCGImage:eased] : depthImage;
+            if (soft) CGImageRelease(soft);
+            if (eased) CGImageRelease(eased);
+            CGImageRelease(depth);
+            [self deliver:artwork generation:generation apply:^{
+                artwork.depth = depthImage;
+                artwork.softDepth = softImage;
+                artwork.easedDepth = easedImage;
+            }];
         }
     }
 
-    // 4. The scene: the objects lifted onto layers, the background painted in under them and around the cover.
-    if (needScene) {
-        NSString *sceneFolder = [folder stringByAppendingPathComponent:peopleOnly ? @"scene-people" : @"scene"];
-        BOOL lamaReady = [AUModelManager.shared stateOf:AUModelInpaint] == AUModelReady;
-        AUScene *scene = keep ? [AUScene readFrom:sceneFolder] : nil;
-        if (scene && !scene.inpainted && lamaReady) scene = nil;   // made while the model was still coming
-        if (!scene) {
-            if ([self stale:generation]) {
-                if (depth) CGImageRelease(depth);
-                break;
-            }
-            double started = AUNowMs();
-            NSString *log = nil;
-            scene = AUSceneBuild(source, depth, peopleOnly, &log);
-            AUStatRecord(@"scene", AUNowMs() - started);
-            AULog(@"%@", log ?: @"scene: none");
-            if (scene && keep) [scene writeTo:sceneFolder];
+    // 4. The subject.
+    if (needCutout) {
+        NSString *cutoutPath = [folder stringByAppendingPathComponent:@"cutout.png"];
+        NSString *backgroundPath = [folder stringByAppendingPathComponent:@"background.jpg"];
+        NSString *infoPath = [folder stringByAppendingPathComponent:@"subject.plist"];
+        NSDictionary *info = keep ? [NSDictionary dictionaryWithContentsOfFile:infoPath] : nil;
+        AUCutoutResult result = {NULL, NULL, CGRectZero, 0};
+        BOOL none = [info[@"none"] boolValue] && [info[@"objects"] boolValue] == objects;
+        if (info && !none && [info[@"objects"] boolValue] == objects) {
+            result.cutout = AUImageFromData([NSData dataWithContentsOfFile:cutoutPath]);
+            result.background = AUImageFromData([NSData dataWithContentsOfFile:backgroundPath]);
+            result.bounds = CGRectMake([info[@"x"] doubleValue], [info[@"y"] doubleValue], [info[@"w"] doubleValue], [info[@"h"] doubleValue]);
         }
-        AUScene *made = scene;
+        if (!none && (!result.cutout || !result.background)) {
+            AUCutoutResultRelease(&result);
+            if ([self stale:generation]) break;
+            double started = AUNowMs();
+            NSString *error = nil;
+            result = AUCutoutSubject(source, objects, &error);
+            AUStatRecord(@"cutout", AUNowMs() - started);
+            if (result.cutout && result.background) {
+                AULog(@"cutout: subject %.0f%% of the cover in %.0f ms", result.coverage * 100, AUNowMs() - started);
+                if (keep) {
+                    [AUPNGData(result.cutout) writeToFile:cutoutPath atomically:YES];
+                    [AUJPEGData(result.background, 0.85) writeToFile:backgroundPath atomically:YES];
+                    [@{@"x": @(result.bounds.origin.x), @"y": @(result.bounds.origin.y), @"w": @(result.bounds.size.width),
+                       @"h": @(result.bounds.size.height), @"objects": @(objects)} writeToFile:infoPath atomically:YES];
+                }
+            } else {
+                AULog(@"cutout: none (%@)", error);
+                none = YES;
+                if (keep) [@{@"none": @YES, @"objects": @(objects)} writeToFile:infoPath atomically:YES];
+            }
+        }
+        UIImage *cutout = result.cutout ? [UIImage imageWithCGImage:result.cutout] : nil;
+        UIImage *background = result.background ? [UIImage imageWithCGImage:result.background] : nil;
+        CGRect bounds = result.bounds;
+        AUCutoutResultRelease(&result);
+        BOOL noSubject = none || !cutout;
         [self deliver:artwork generation:generation apply:^{
-            artwork.scene = made;
-            artwork.sceneChecked = YES;
-            artwork.scenePeopleOnly = peopleOnly;
+            artwork.cutout = cutout;
+            artwork.background = background;
+            artwork.subjectBounds = bounds;
+            artwork.noSubject = noSubject;
+            artwork.cutoutObjects = objects;
         }];
     }
-    if (depth) CGImageRelease(depth);
     {
         double total = (CACurrentMediaTime() - arrived) * 1000;
         dispatch_async(dispatch_get_main_queue(), ^{

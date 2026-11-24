@@ -46,19 +46,20 @@ UIViewController *AUSettingsPage(void) {
                                  ^NSString *(double value) { return [NSString stringWithFormat:@"%.0f%%", value * 100]; });
     tint.waitsOn = AUKeyTheme;
     ADD(cover, tint);
-    SGModRow *depth = AURowSwitch(@"Живые обложки", @"3D-сцена: объекты обложки целыми слоями над дорисованным фоном, движутся от гироскопа", AUKeyDepth);
+    SGModRow *depth = AURowSwitch(@"Живые обложки", @"Карта глубины и гироскоп: обложка как 3D-открытка", AUKeyDepth);
     depth.changed = ^(BOOL on) { AUSettingsChanged(); };
     ADD(cover, AURowSymbol(depth, @"cube.transparent"));
     SGModRow *strength = AURowSlider(@"Сила параллакса", nil, 0.3, 3.0, 0.1, ^double { return AUNumber(AUKeyDepthStrength, 1.0); },
                                      ^(double value) { AUSetNumber(AUKeyDepthStrength, value); },
                                      ^NSString *(double value) { return [NSString stringWithFormat:@"×%.1f", value]; });
     ADD(cover, strength);
-    SGModRow *cutout = AURowSwitch(@"Артист из обложки", @"Объекты выходят за рамку обложки поверх стекла", AUKeyCutout);
+    SGModRow *cutout = AURowOption(@"Артист из обложки", @"Человек вырезается и выходит из кадра, фон под ним размывается", AUKeyPopOut);
     cutout.changed = ^(BOOL on) { AUSettingsChanged(); };
     ADD(cover, AURowSymbol(cutout, @"person.crop.rectangle.stack"));
-    SGModRow *people = AURowOption(@"Только люди", @"Отдельными слоями только люди, остальное остаётся фоном", AUKeyScenePeopleOnly);
-    people.changed = ^(BOOL on) { AUSettingsChanged(); };
-    ADD(cover, people);
+    SGModRow *objects = AURowOption(@"Не только люди", @"Вырезать и животных, и предметы", AUKeyCutoutObjects);
+    objects.changed = ^(BOOL on) { AUSettingsChanged(); };
+    objects.waitsOn = AUKeyPopOut;
+    ADD(cover, objects);
     SGModRow *upscale = AURowSwitch(@"Апскейл обложек", @"Обложки меньше 600 px дотягиваются нейросетью", AUKeyUpscale);
     upscale.changed = ^(BOOL on) { AUSettingsChanged(); };
     ADD(cover, AURowSymbol(upscale, @"arrow.up.left.and.arrow.down.right"));
@@ -73,7 +74,6 @@ UIViewController *AUSettingsPage(void) {
     NSMutableArray *models = [NSMutableArray array];
     ADD(models, modelRow(AUModelDepth, @"глубина"));
     ADD(models, modelRow(AUModelUpscale, @"апскейл"));
-    ADD(models, modelRow(AUModelInpaint, @"дорисовка фона"));
     SGModRow *vision = AURowStat(@"Vision · маска человека", ^NSString *{ return @"системная · 0 МБ"; });
     ADD(models, vision);
     SGModRow *kmeans = AURowStat(@"Палитра · k-means (vDSP)", ^NSString *{ return @"без нейросети · 0 МБ"; });
@@ -92,8 +92,7 @@ UIViewController *AUSettingsPage(void) {
     ADD(stats, AURowStat(@"Обложка → эффекты", ^NSString *{ return AUStatText(@"shown"); }));
     ADD(stats, AURowStat(@"Палитра", ^NSString *{ return AUStatText(@"palette"); }));
     ADD(stats, AURowStat(@"Глубина", ^NSString *{ return AUStatText(@"depth"); }));
-    ADD(stats, AURowStat(@"Сцена (объекты + дорисовка)", ^NSString *{ return AUStatText(@"scene"); }));
-    ADD(stats, AURowStat(@"Из них дорисовка LaMa", ^NSString *{ return AUStatText(@"inpaint"); }));
+    ADD(stats, AURowStat(@"Вырезка", ^NSString *{ return AUStatText(@"cutout"); }));
     ADD(stats, AURowStat(@"Апскейл", ^NSString *{ return AUStatText(@"upscale"); }));
     ADD(stats, AURowStat(@"Загрузка модели глубины", ^NSString *{ return AUStatText(@"load." AUModelDepth); }));
     ADD(stats, AURowStat(@"Память Spotify", ^NSString *{ return [NSString stringWithFormat:@"%@ (пик %@)", AUBytes(AUFootprint()), AUBytes(AUPeakFootprint())]; }));
@@ -107,7 +106,7 @@ UIViewController *AUSettingsPage(void) {
     ADD(stats, AURowAction(@"Поделиться логом", @"Documents/Aura/aura.log, в нём строка телеметрии раз в минуту", ^{ AUShareFile(AULogURL()); }));
     ADD(sections, AUSection(@"Диагностика", stats, nil));
 
-    NSString *footer = [NSString stringWithFormat:@"Aura %s — отдельный аддон к Taurus, ничего в Taurus не меняет.\nTaurus © Vojtěch Škopek (spoti.pw), PolyForm Strict 1.0.0.\nDepth Anything V2 — Apache-2.0, Real-ESRGAN — BSD-3-Clause, Big-LaMa — Apache-2.0.", AURA_VERSION];
+    NSString *footer = [NSString stringWithFormat:@"Aura %s — отдельный аддон к Taurus, ничего в Taurus не меняет.\nTaurus © Vojtěch Škopek (spoti.pw), PolyForm Strict 1.0.0.\nDepth Anything V2 — Apache-2.0, Real-ESRGAN — BSD-3-Clause.", AURA_VERSION];
     return [[NSClassFromString(@"SGModPage") alloc] initWithTitle:@"Aura" intro:nil sections:sections footer:footer];
 }
 
