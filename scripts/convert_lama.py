@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Big-LaMa (advimman/lama, Apache-2.0) -> Core ML, one fixed 512 x 512 canvas, computed in fp32: in fp16 the
-Fourier units' sums overflow on the phone's Neural Engine and the fill comes out as noise.
+"""Big-LaMa (advimman/lama, Apache-2.0) -> Core ML, one fixed 512 x 512 canvas, fp16 with the Fourier
+matrices pre-scaled so no sum overflows.
 
 LaMa's Fourier units use torch.fft.rfftn / irfftn. At a fixed size they are exact matrix products with the discrete
 Fourier transform's cos/sin matrices, which Core ML runs (on the Neural Engine too), so the units are rewritten that
@@ -33,7 +33,10 @@ def dft(n, half):
         k = np.arange(n // 2 + 1 if half else n)
         m = np.arange(n)
         angle = 2 * math.pi * np.outer(m, k) / n  # (n, k)
-        _dft[key] = (torch.tensor(np.cos(angle), dtype=torch.float32), torch.tensor(np.sin(angle), dtype=torch.float32))
+        # Each matrix carries its own 1/sqrt(n) (the ortho norm), so no sum ever grows past the input's scale: summed
+        # first and scaled after, 64 x 64 terms overflowed fp16 (max 65504) and the phone's fill came out as noise.
+        scale = 1.0 / math.sqrt(n)
+        _dft[key] = (torch.tensor(np.cos(angle) * scale, dtype=torch.float32), torch.tensor(np.sin(angle) * scale, dtype=torch.float32))
     return _dft[key]
 
 
@@ -46,8 +49,7 @@ def rfft2_ortho(x):
     ch, sh = dft(h, False)         # (h, h), symmetric
     re = torch.matmul(ch, a) + torch.matmul(sh, b)
     im = torch.matmul(ch, b) - torch.matmul(sh, a)
-    s = 1.0 / math.sqrt(h * w)
-    return re * s, im * s
+    return re, im
 
 
 def irfft2_ortho(re, im, h, w):
@@ -61,8 +63,7 @@ def irfft2_ortho(re, im, h, w):
     weight[0] = 1.0
     if w % 2 == 0:
         weight[-1] = 1.0
-    out = torch.matmul(zr * weight, cw.t()) - torch.matmul(zi * weight, sw.t())
-    return out / math.sqrt(h * w)
+    return torch.matmul(zr * weight, cw.t()) - torch.matmul(zi * weight, sw.t())
 
 
 def fourier_forward(self, x):
@@ -82,8 +83,7 @@ def rfft2_ortho_sized(x, h, w):
     ch, sh = dft(h, False)
     re = torch.matmul(ch, a) + torch.matmul(sh, b)
     im = torch.matmul(ch, b) - torch.matmul(sh, a)
-    s = 1.0 / math.sqrt(h * w)
-    return re * s, im * s
+    return re, im
 
 
 def record_shapes(net, *inputs):
@@ -154,18 +154,16 @@ def main():
         inputs=[ct.ImageType(name='image', shape=img.shape, scale=1 / 255.0, color_layout=ct.colorlayout.RGB),
                 ct.ImageType(name='mask', shape=mask.shape, scale=1 / 255.0, color_layout=ct.colorlayout.GRAYSCALE)],
         outputs=[ct.ImageType(name='filled', color_layout=ct.colorlayout.RGB)],
-        compute_precision=ct.precision.FLOAT32,
-        minimum_deployment_target=ct.target.iOS18,
+        compute_precision=ct.precision.FLOAT16,
+        minimum_deployment_target=ct.target.iOS17,
         convert_to='mlprogram',
     )
     import coremltools.optimize.coreml as cto
-    # 8-bit weights in blocks of 32 input channels, only for the convolutions (the Fourier matrices stay exact).
-    # Per channel was too coarse: big holes came out tinted (checked in PyTorch: a blue-green cast); blocks of 32 keep
-    # the fill's colour.
-    config = cto.OptimizationConfig(global_config=cto.OpLinearQuantizerConfig(
-        mode='linear_symmetric', granularity='per_block', block_size=32, weight_threshold=8192))
-    mlmodel = cto.linear_quantize_weights(mlmodel, config)
-    mlmodel.short_description = 'Big-LaMa inpainting (advimman/lama, Apache-2.0), 512x512, fp32 compute, int8 weights'
+    # 8-bit k-means palettes, only for the convolutions: the Fourier matrices (64 x 64 at most) stay exact. (Per-channel
+    # linear int8 tinted big holes blue-green; palettes keep the fill's colour.)
+    config = cto.OptimizationConfig(global_config=cto.OpPalettizerConfig(mode='kmeans', nbits=8, weight_threshold=8192))
+    mlmodel = cto.palettize_weights(mlmodel, config)
+    mlmodel.short_description = 'Big-LaMa inpainting (advimman/lama, Apache-2.0), 512x512, fp16, scaled Fourier matrices, 8-bit palettized'
     mlmodel.license = 'Apache-2.0'
     mlmodel.save(OUT)
     print('saved', OUT)
