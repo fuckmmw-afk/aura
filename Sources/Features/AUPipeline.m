@@ -57,6 +57,7 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(settingsChanged) name:AUThrottleDidChangeNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(memoryWarning)
                                                name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(trackChanged:) name:AUTrackDidChangeNotification object:nil];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{ [self pruneTo:kCacheLimit]; });
     [self artworkChanged:nil];
 }
@@ -88,6 +89,20 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
         self->_scheduled = NO;
         [self beginPending];
     });
+}
+
+// The next song of the same album: Taurus publishes nothing (its picture has not changed), so the artwork, with all
+// that was made from it, is handed to the new track here — else it would wait for a picture that never comes.
+- (void)trackChanged:(NSNotification *)note {
+    NSString *uri = note.userInfo[@"uri"];
+    AUArtwork *current = _current;
+    if (!uri.length || !current || [current.trackURI isEqualToString:uri]) return;
+    NSString *picture = AUTaurusTrackPictureKey();
+    if (picture.length && [current.key isEqualToString:picture]) {
+        current.trackURI = uri;
+        AULog(@"track %@ shares the cover: its artwork carries over", [uri substringFromIndex:uri.length > 8 ? uri.length - 8 : 0]);
+        [self post:current];
+    }
 }
 
 - (void)beginPending {

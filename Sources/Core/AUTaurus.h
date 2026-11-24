@@ -25,6 +25,8 @@ void AUTaurusRestart(void);
 // The track playing now, from Taurus's player state: its URI ("spotify:track:…") and title. nil before it reports.
 NSString *_Nullable AUTaurusTrackURI(void);
 NSString *_Nullable AUTaurusTrackTitle(void);
+// The picture the playing track names, keyed as Taurus keys its artwork (an album's songs share it), or nil.
+NSString *_Nullable AUTaurusTrackPictureKey(void);
 // Posted on the main queue when the playing track's URI changes; userInfo "uri".
 extern NSNotificationName const AUTrackDidChangeNotification;
 void AUTaurusFollowTrack(void);

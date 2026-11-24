@@ -176,6 +176,24 @@ NSString *AUTaurusTrackTitle(void) {
     return [title isKindOfClass:NSString.class] ? title : nil;
 }
 
+// As Taurus's SGRBridges.x pictureOf: the largest image the metadata names; every size of one picture shares the
+// id's last 24 digits.
+NSString *AUTaurusTrackPictureKey(void) {
+    id track = playerTrack();
+    NSDictionary *metadata = [track respondsToSelector:NSSelectorFromString(@"metadata")] ? [track valueForKey:@"metadata"] : nil;
+    if (![metadata isKindOfClass:NSDictionary.class]) return nil;
+    for (NSString *field in @[@"image_xlarge_url", @"image_large_url", @"image_url", @"image_small_url"]) {
+        id value = metadata[field];
+        if (![value isKindOfClass:NSString.class] || ![value length]) continue;
+        NSString *identifier = nil;
+        if ([value hasPrefix:@"spotify:image:"]) identifier = [value substringFromIndex:@"spotify:image:".length];
+        else if ([value hasPrefix:@"https://"]) identifier = [value lastPathComponent];
+        if (!identifier.length) continue;
+        return identifier.length == 40 ? [identifier substringFromIndex:16] : identifier;
+    }
+    return nil;
+}
+
 @interface AUTrackFollower : NSObject
 @property (nonatomic, copy) NSString *uri;
 @end
