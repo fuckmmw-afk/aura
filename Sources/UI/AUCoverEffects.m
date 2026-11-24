@@ -1,8 +1,6 @@
 #import "AUCoverEffects.h"
 #import "Core/AUCore.h"
 #import "Core/AUTaurus.h"
-#import "Features/AUDepthLayers.h"
-#import "AUParallaxRenderer.h"
 #import "Features/AUPipeline.h"
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
@@ -10,28 +8,27 @@
 #import <objc/runtime.h>
 
 static const CGFloat kCoverMinWidth = 200;
-static const CGFloat kStepOut = 1.07;            // the subject's scale over the cover, from its foot (the cover only)
-static const CGFloat kMaxTilt = 0.20;            // gravity change (≈ radians) for a full shift
-static const CGFloat kStrength = 0.04;           // a full tilt moves a layer at depth d by kStrength * side * (d - 0.5)
-static const CFTimeInterval kSubjectWait = 0.35; // how long a cover with a subject still to come waits for it
+static const CGFloat kStepOut = 1.06;            // the objects' scale over the cover, from its foot (the cover only)
+static const CGFloat kMaxTilt = 0.20;            // gravity change (≈ radians) for a full tilt
+static const CGFloat kStrength = 0.04;           // a full tilt moves the nearest object kStrength * side against the background
+static const CGFloat kBackgroundShare = 0.25;    // the background's own move, against the tilt, as a share of that
 
 typedef NS_ENUM(NSInteger, AUSurfaceKind) {
     AUSurfaceCover,
     AUSurfaceFill,
 };
 
-// One place the effects are drawn: the cover bent by its softened depth (Metal), and the subject over it.
+// One place the scene is drawn: its background in a clipped stage, and its objects above.
 @interface AUSurface : NSObject
 @property (nonatomic) AUSurfaceKind kind;
-@property (nonatomic, strong) CALayer *stage;
-@property (nonatomic, strong) AUParallaxRenderer *renderer;
-@property (nonatomic, strong) CALayer *subjectClip;          // Fill: the fill's frame, clipped, faded later than it
-@property (nonatomic, strong) CALayer *subject;
-@property (nonatomic, strong) CAGradientLayer *subjectMask;
-@property (nonatomic, weak) AUArtwork *content;
-@property (nonatomic) BOOL contentDepth, contentSubject;
+@property (nonatomic, strong) CALayer *stage;                 // clipped to the cover or the fill
+@property (nonatomic, strong) CALayer *background;
+@property (nonatomic, strong) CALayer *objects;               // the objects' host: unclipped over the cover, clipped and faded in Fill
+@property (nonatomic, strong) CAGradientLayer *objectsMask;
+@property (nonatomic, strong) NSMutableArray<CALayer *> *layers;
+@property (nonatomic, weak) AUScene *content;
+@property (nonatomic) CGRect pictureRect;                     // where the picture is drawn in the stage, zoomed
 @property (nonatomic) BOOL attached;
-@property (nonatomic) CGRect pictureRect;                    // where the cover is drawn in the stage, zoomed
 @end
 
 @implementation AUSurface
@@ -99,7 +96,7 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
     AUSurface *_coverSurface, *_fillSurface;
     __weak AUArtwork *_shown;
     NSString *_shownKey;
-    BOOL _shownDepth, _shownSubject, _wantPlane;
+    BOOL _shownMoving, _wantPlane;
     CADisplayLink *_link;
     CFTimeInterval _lastMove;
     CMMotionManager *_motion;
@@ -108,7 +105,7 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
     double _refX, _refY;
     BOOL _refSet;
     CGPoint _tiltNow;
-    BOOL _pickScheduled, _active, _waitScheduled;
+    BOOL _pickScheduled, _active;
     NSUInteger _frames;
 }
 
@@ -242,34 +239,20 @@ static UIView *taurusField(void) {
     surface.kind = kind;
     surface.stage = plainLayer();
     surface.stage.masksToBounds = YES;
-    surface.renderer = [AUParallaxRenderer new];
-    surface.renderer.layer.actions = noActions();
-    [surface.stage addSublayer:surface.renderer.layer];
-    CALayer *subject = plainLayer();
-    subject.opacity = 0;
-    if (kind == AUSurfaceCover) {
-        subject.shadowColor = UIColor.blackColor.CGColor;
-        subject.shadowOpacity = 0.45;
-        subject.shadowRadius = 14;
-        subject.shadowOffset = CGSizeMake(0, 8);
-        // A shadow of the picture's own shape costs an offscreen pass a frame; rasterized it is drawn once and moved.
-        subject.shouldRasterize = YES;
-        subject.rasterizationScale = UIScreen.mainScreen.scale;
-    } else {
-        // Fill: the subject in a clip the fill's size, fading later than Taurus's fill (0.76...0.985 of its height),
-        // so it stays where the cover has melted into the player.
-        CALayer *clip = plainLayer();
-        clip.masksToBounds = YES;
+    surface.background = plainLayer();
+    [surface.stage addSublayer:surface.background];
+    surface.objects = plainLayer();
+    surface.layers = [NSMutableArray array];
+    if (kind == AUSurfaceFill) {
+        // The objects fade later than Taurus's fill (0.76...0.985 of its height): they stay where the cover has melted.
+        surface.objects.masksToBounds = YES;
         CAGradientLayer *mask = [CAGradientLayer layer];
         mask.actions = noActions();
         mask.colors = @[(id)UIColor.whiteColor.CGColor, (id)UIColor.whiteColor.CGColor, (id)[UIColor colorWithWhite:1 alpha:0].CGColor];
         mask.locations = @[@0, @0.86, @1];
-        clip.mask = mask;
-        [clip addSublayer:subject];
-        surface.subjectClip = clip;
-        surface.subjectMask = mask;
+        surface.objects.mask = mask;
+        surface.objectsMask = mask;
     }
-    surface.subject = subject;
     return surface;
 }
 
@@ -291,27 +274,34 @@ static UIView *taurusField(void) {
     [self updateMotion];
 }
 
-#pragma mark - placing a surface
+#pragma mark - geometry
 
-// The picture aspect-filled into `bounds` and zoomed just enough that a full shift never shows its edge.
-static CGFloat zoomFor(BOOL moving) {
-    return moving ? 1 + 1.1 * kStrength * AUNumber(AUKeyDepthStrength, 1.0) : 1;
+static CGFloat strengthNow(void) {
+    return kStrength * AUNumber(AUKeyDepthStrength, 1.0);
 }
 
-static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
-    CGFloat side = MAX(bounds.size.width, bounds.size.height) * zoomFor(moving);
-    return CGRectMake(CGRectGetMidX(bounds) - side / 2, CGRectGetMidY(bounds) - side / 2, side, side);
+// The picture (the cover's square, or Fill's 3:4 canvas) aspect-filled into `bounds`, zoomed just enough that the
+// background's own move never shows its edge.
+static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving) {
+    if (picture.width <= 0 || picture.height <= 0) return bounds;
+    CGFloat scale = MAX(bounds.size.width / picture.width, bounds.size.height / picture.height);
+    if (moving) scale *= 1 + 2.2 * kBackgroundShare * strengthNow();
+    CGSize size = CGSizeMake(picture.width * scale, picture.height * scale);
+    return CGRectMake(CGRectGetMidX(bounds) - size.width / 2, CGRectGetMidY(bounds) - size.height / 2, size.width, size.height);
+}
+
+- (CGSize)pictureSizeFor:(AUSurface *)surface {
+    AUScene *scene = surface.content;
+    if (!scene) return CGSizeZero;
+    return surface.kind == AUSurfaceCover ? scene.square.size : scene.background.size;
 }
 
 - (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {
+    surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, [self pictureSizeFor:surface], _shownMoving);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    BOOL moving = _shownDepth || _shownSubject;
-    surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, moving);
-    surface.renderer.layer.frame = (CGRect){CGPointZero, bounds.size};
-    surface.renderer.zoom = zoomFor(moving);
-    // The whole Fill at 3x would be two million pixels a frame; at 2x it is under one and still sharp under the fade.
-    [surface.renderer layoutForScale:surface.kind == AUSurfaceFill ? 2 : UIScreen.mainScreen.scale];
+    surface.background.bounds = (CGRect){CGPointZero, surface.pictureRect.size};
+    surface.background.position = CGPointMake(CGRectGetMidX(surface.pictureRect), CGRectGetMidY(surface.pictureRect));
     [CATransaction commit];
     [self moveSurfaces];
 }
@@ -329,7 +319,9 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
         _subjectHost.userInteractionEnabled = NO;
     }
     [_plane.layer addSublayer:_coverSurface.stage];
-    [_subjectHost.layer addSublayer:_coverSurface.subject];
+    // Stepping out, the objects live over the cover, unclipped; else inside it, clipped to its corners.
+    if (AUFlag(AUKeyPopOut)) [_subjectHost.layer addSublayer:_coverSurface.objects];
+    else [_plane.layer addSublayer:_coverSurface.objects];
     [_cover addSubview:_plane];
     [_tilt addSubview:_subjectHost];
     _tilt.clipsToBounds = NO;
@@ -384,7 +376,7 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
     if (!fill || !_field) return;
     // Lowest in `_fill`: under its blurred bands, inside its fading mask.
     [fill insertSublayer:_fillSurface.stage atIndex:0];
-    if (fill.superlayer) [fill.superlayer insertSublayer:_fillSurface.subjectClip above:fill];
+    if (fill.superlayer) [fill.superlayer insertSublayer:_fillSurface.objects above:fill];
     _fillSurface.stage.opacity = 0;
     _fillSurface.attached = YES;
     _fillSurface.content = nil;
@@ -396,7 +388,7 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
 
 - (void)detachFill {
     [_fillSurface.stage removeFromSuperlayer];
-    [_fillSurface.subjectClip removeFromSuperlayer];
+    [_fillSurface.objects removeFromSuperlayer];
     _fillSurface.attached = NO;
 }
 
@@ -406,48 +398,52 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _fillSurface.stage.frame = fill.bounds;
-    _fillSurface.subjectClip.frame = fill.frame;
-    _fillSurface.subjectMask.frame = (CGRect){CGPointZero, fill.bounds.size};
+    _fillSurface.objects.frame = fill.frame;
+    _fillSurface.objectsMask.frame = (CGRect){CGPointZero, fill.bounds.size};
     [CATransaction commit];
     [self placeSurface:_fillSurface stageBounds:fill.bounds];
 }
 
 #pragma mark - moving
 
-// Each layer slides by its depth; the subject, nearest, most. Down the screen is +y in both UIKit and the layers.
+// The background slides a little against the tilt; each object, whole, with it by its depth. Nothing is bent.
 - (void)moveSurfaces {
-    CGFloat strength = kStrength * AUNumber(AUKeyDepthStrength, 1.0);
-    BOOL moving = _shownDepth;
+    CGFloat strength = _shownMoving ? strengthNow() : 0;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     for (AUSurface *surface in [self attachedSurfaces]) {
-        CGFloat side = surface.pictureRect.size.width;
-        surface.renderer.strength = moving ? strength : 0;
-        surface.renderer.tilt = _tiltNow;
-        if (surface.content) [surface.renderer render];
-        CGFloat amount = (moving || _shownSubject) ? strength * side * (AUSubjectDepth - 0.5) : 0;
-        CGPoint offset = CGPointMake(_tiltNow.x * amount, _tiltNow.y * amount);
-        if (surface.kind == AUSurfaceCover) {
-            UIView *cover = _cover;
-            if (!cover) continue;
-            // At the cover's foot, a little bigger than the picture: it steps out of the frame and fades with the cover.
-            CGRect picture = [_plane.layer convertRect:surface.pictureRect fromLayer:surface.stage];
-            CGPoint center = [_tilt convertPoint:CGPointMake(CGRectGetMidX(picture), CGRectGetMidY(picture)) fromView:_plane];
-            CALayer *subject = surface.subject;
-            subject.bounds = (CGRect){CGPointZero, picture.size};
-            subject.position = center;
-            CGAffineTransform own = CGAffineTransformConcat(CGAffineTransformMakeScale(kStepOut, kStepOut),
-                CGAffineTransformMakeTranslation(offset.x, offset.y + picture.size.height / 2 * (1 - kStepOut)));
-            subject.affineTransform = CGAffineTransformConcat(own, cover.transform);
-            subject.opacity = (_shownSubject && _plane.alpha > 0.01) ? (float)(cover.alpha * _plane.alpha) : 0;
-        } else {
-            // The same rectangle as the picture's, in the clip (which sits where the fill does).
-            CALayer *subject = surface.subject;
-            subject.bounds = (CGRect){CGPointZero, surface.pictureRect.size};
-            subject.position = CGPointMake(CGRectGetMidX(surface.pictureRect), CGRectGetMidY(surface.pictureRect));
-            subject.affineTransform = CGAffineTransformMakeTranslation(offset.x, offset.y);
-            subject.opacity = _shownSubject ? 1 : 0;
-            surface.subjectClip.opacity = surface.stage.opacity * (_fillLayer ? _fillLayer.opacity : 1);
+        AUScene *scene = surface.content;
+        CGRect picture = surface.pictureRect;
+        CGFloat side = MIN(picture.size.width, picture.size.height);
+        CGFloat back = -kBackgroundShare * strength * side;
+        surface.background.affineTransform = CGAffineTransformMakeTranslation(_tiltNow.x * back, _tiltNow.y * back);
+        CGRect objectsRect = picture;
+        CGAffineTransform base = CGAffineTransformIdentity;
+        if (surface.kind == AUSurfaceCover && _cover && surface.objects.superlayer == _plane.layer) {
+            surface.objects.frame = _plane.bounds;
+            surface.objects.opacity = 1;
+        } else if (surface.kind == AUSurfaceCover && _cover) {
+            // Over the cover, in the tilt view: a little bigger from its foot, taking the cover's paused shrink.
+            CGRect inPlane = [_plane.layer convertRect:picture fromLayer:surface.stage];
+            CGPoint center = [_tilt convertPoint:CGPointMake(CGRectGetMidX(inPlane), CGRectGetMidY(inPlane)) fromView:_plane];
+            objectsRect = CGRectMake(center.x - inPlane.size.width / 2, center.y - inPlane.size.height / 2, inPlane.size.width, inPlane.size.height);
+            // Stepping out of the frame (a little bigger, from the foot) only when asked: otherwise the objects lie
+            // exactly on their place in the cover.
+            CGFloat stepOut = AUFlag(AUKeyPopOut) ? kStepOut : 1;
+            base = CGAffineTransformConcat(CGAffineTransformConcat(CGAffineTransformMakeScale(stepOut, stepOut),
+                                                                   CGAffineTransformMakeTranslation(0, objectsRect.size.height / 2 * (1 - stepOut))),
+                                           _cover.transform);
+            surface.objects.opacity = (float)(_cover.alpha * _plane.alpha);
+        } else if (surface.kind == AUSurfaceFill) {
+            surface.objects.opacity = surface.stage.opacity * (_fillLayer ? _fillLayer.opacity : 1);
+        }
+        for (NSUInteger i = 0; i < surface.layers.count; i++) {
+            CALayer *layer = surface.layers[i];
+            AUSceneLayer *object = i < scene.layers.count ? scene.layers[i] : nil;
+            CGFloat amount = object ? [scene weightOf:object] * strength * side : 0;
+            layer.bounds = (CGRect){CGPointZero, objectsRect.size};
+            layer.position = CGPointMake(CGRectGetMidX(objectsRect), CGRectGetMidY(objectsRect));
+            layer.affineTransform = CGAffineTransformConcat(CGAffineTransformMakeTranslation(_tiltNow.x * amount, _tiltNow.y * amount), base);
         }
     }
     [CATransaction commit];
@@ -455,8 +451,8 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
 
 #pragma mark - what is shown
 
-- (BOOL)wantsDepth { return AUEnabled(AUKeyDepth) && !AUThrottled(); }
-- (BOOL)wantsSubject { return AUFlag(AUKeyPopOut) && !AUThrottled(); }
+- (BOOL)wantsMotion { return AUEnabled(AUKeyDepth) && !AUThrottled(); }
+- (BOOL)wantsObjects { return AUEnabled(AUKeyDepth) && !AUThrottled(); }
 
 - (void)artworkChanged:(NSNotification *)note {
     [self apply:note.object animated:YES];
@@ -464,6 +460,12 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
 
 - (void)refresh {
     _shownKey = nil;
+    if (_coverSurface.attached) {
+        // The pop-out switch moves the objects between the cover and the tilt view.
+        [self detachCover];
+        [self attachCover];
+    }
+    for (AUSurface *surface in [self attachedSurfaces]) surface.content = nil;
     [self apply:[AUPipeline shared].current animated:YES];
 }
 
@@ -472,7 +474,7 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
     NSString *uri = note.userInfo[@"uri"];
     if ([_shown.trackURI isEqualToString:uri]) return;
     _shownKey = nil;
-    _shownDepth = _shownSubject = _wantPlane = NO;
+    _shownMoving = _wantPlane = NO;
     [self setShown:NO animated:NO];
     [self updateMotion];
 }
@@ -499,39 +501,55 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
             fade.toValue = @(target);
             fade.duration = 0.22;
             [stage addAnimation:fade forKey:@"aura.fade"];
-            [_fillSurface.subjectClip addAnimation:[fade copy] forKey:@"aura.fade"];
+            [_fillSurface.objects addAnimation:[fade copy] forKey:@"aura.fade"];
         }
         stage.opacity = target;
     }
     [self moveSurfaces];
 }
 
+- (void)fill:(AUSurface *)surface with:(AUScene *)scene showObjects:(BOOL)objects {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    BOOL cover = surface.kind == AUSurfaceCover;
+    UIImage *background = cover ? [scene squareOf:scene.background] : scene.background;
+    surface.background.contents = (__bridge id)background.CGImage;
+    for (CALayer *layer in surface.layers) [layer removeFromSuperlayer];
+    [surface.layers removeAllObjects];
+    if (objects) {
+        for (AUSceneLayer *object in scene.layers) {
+            CALayer *layer = plainLayer();
+            UIImage *image = cover ? [scene squareOf:object.image] : object.image;
+            layer.contents = (__bridge id)image.CGImage;
+            if (cover && AUFlag(AUKeyPopOut)) {
+                layer.shadowColor = UIColor.blackColor.CGColor;
+                layer.shadowOpacity = 0.35;
+                layer.shadowRadius = 10;
+                layer.shadowOffset = CGSizeMake(0, 6);
+                // A shadow of the picture's own shape costs an offscreen pass a frame; rasterized it is drawn once and moved.
+                layer.shouldRasterize = YES;
+                layer.rasterizationScale = UIScreen.mainScreen.scale;
+            }
+            [surface.objects addSublayer:layer];
+            [surface.layers addObject:layer];
+        }
+    }
+    [CATransaction commit];
+    surface.content = scene;
+}
+
 - (void)apply:(AUArtwork *)artwork animated:(BOOL)animated {
     NSArray<AUSurface *> *surfaces = [self attachedSurfaces];
     if (!surfaces.count) return;
     if (artwork != [AUPipeline shared].current) return;
-    BOOL depth = [self wantsDepth] && artwork.depth;
-    BOOL subject = [self wantsSubject] && artwork.cutout && artwork.background;
-    BOOL upscaled = artwork.upscaled && AUEnabled(AUKeyUpscale);
-    BOOL wantPlane = (depth || subject || upscaled) && artwork.source && forCurrentTrack(artwork);
+    AUScene *scene = artwork.scene;
+    BOOL objects = [self wantsObjects] && scene.layers.count;
+    BOOL moving = [self wantsMotion] && objects;
+    BOOL wantPlane = scene && ([self wantsObjects] || artwork.upscaled) && forCurrentTrack(artwork);
     BOOL sameCover = [artwork.key isEqualToString:_shownKey];
     if (!sameCover) {
-        _shownDepth = _shownSubject = NO;
-        _wantPlane = NO;
+        _shownMoving = _wantPlane = NO;
         [self setShown:NO animated:NO];
-    }
-    BOOL subjectPending = [self wantsSubject] && !artwork.cutout && !artwork.noSubject;
-    CFTimeInterval waited = CACurrentMediaTime() - artwork.arrived;
-    if (wantPlane && subjectPending && waited < kSubjectWait && !_shownDepth) {
-        if (!_waitScheduled) {
-            _waitScheduled = YES;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((kSubjectWait - waited) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                self->_waitScheduled = NO;
-                [self apply:[AUPipeline shared].current animated:YES];
-            });
-        }
-        _shownKey = artwork.key;
-        return;
     }
     _shown = artwork;
     _shownKey = artwork.key;
@@ -541,40 +559,22 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
         [self updateMotion];
         return;
     }
-    BOOL changed = NO;
     for (AUSurface *surface in surfaces) {
-        if (surface.content == artwork && surface.contentDepth == depth && surface.contentSubject == subject) continue;
-        changed = YES;
-        // The depth as the model gave it (lightly smoothed), so a face moves whole; softened only under a lifted
-        // subject, whose outline would otherwise tear the filled-in background.
-        UIImage *color = subject ? artwork.background : artwork.source;
-        // The model's own depth (only lightly smoothed): each thing moves whole. Softened only under a lifted subject.
-        UIImage *map = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth) : nil;
-        [surface.renderer setColor:color.CGImage depth:map.CGImage];
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        surface.subject.contents = subject ? (__bridge id)artwork.cutout.CGImage : nil;
-        [CATransaction commit];
-        surface.content = artwork;
-        surface.contentDepth = depth;
-        surface.contentSubject = subject;
+        if (surface.content != scene) [self fill:surface with:scene showObjects:objects];
     }
     BOOL first = !_wantPlane;
-    _shownDepth = depth;
-    _shownSubject = subject;
+    _shownMoving = moving;
     _wantPlane = YES;
-    if (changed) {
-        if (_coverSurface.attached) [self placeSurface:_coverSurface stageBounds:_plane.bounds];
-        if (_fillSurface.attached && _fillLayer) [self placeSurface:_fillSurface stageBounds:_fillLayer.bounds];
-    }
+    if (_coverSurface.attached) [self placeSurface:_coverSurface stageBounds:_plane.bounds];
+    if (_fillSurface.attached && _fillLayer) [self placeSurface:_fillSurface stageBounds:_fillLayer.bounds];
     if (first) {
-        double latency = waited * 1000;
+        double latency = (CACurrentMediaTime() - artwork.arrived) * 1000;
         AUStatRecord(@"shown", latency);
         static NSUInteger logged;
         if (logged++ < 60) {
-            AULog(@"artwork …%@ shown %.0f ms after it came: depth %d, subject %d, upscaled %d, on %@",
-                  [artwork.key substringFromIndex:artwork.key.length > 10 ? artwork.key.length - 10 : 0], latency, depth, subject,
-                  upscaled, _fillSurface.attached ? @"Fill" : @"the cover");
+            AULog(@"artwork …%@ shown %.0f ms after it came: %lu objects, %@, on %@",
+                  [artwork.key substringFromIndex:artwork.key.length > 10 ? artwork.key.length - 10 : 0], latency,
+                  (unsigned long)scene.layers.count, scene.inpainted ? @"painted in" : @"quick fill", _fillSurface.attached ? @"Fill" : @"the cover");
         }
     }
     [self setShown:YES animated:animated];
@@ -588,10 +588,10 @@ static CGRect pictureRectIn(CGRect bounds, BOOL moving) {
 }
 
 - (BOOL)needsMotion {
-    return _active && _wantPlane && (_shownDepth || _shownSubject) && !AUThrottled() && [self visible];
+    return _active && _wantPlane && _shownMoving && !AUThrottled() && [self visible];
 }
 
-// While the artwork can move, Core Motion runs on its own queue at 20 Hz to notice the phone moving; only then a
+// While the scene can move, Core Motion runs on its own queue at 20 Hz to notice the phone moving; only then a
 // display link runs, at up to 120 Hz, until the phone has been still for 0.8 s. The layers only move: Core
 // Animation draws them, nothing is rendered per frame.
 - (void)updateMotion {

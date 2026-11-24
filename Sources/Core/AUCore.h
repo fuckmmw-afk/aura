@@ -25,9 +25,10 @@ NSURL *AULogURL(void);
 #define AUKeyThemeStrength @"aura.theme.strength"
 #define AUKeyDepth @"aura.depth"
 #define AUKeyDepthStrength @"aura.depth.strength"
-#define AUKeyCutout @"aura.cutout"                // (retired: the pop-out is AUKeyPopOut, off by default)
-#define AUKeyPopOut @"aura.popout"                // off until switched on
-#define AUKeyCutoutObjects @"aura.cutout.objects" // off until switched on
+#define AUKeyCutout @"aura.cutout"                // (retired)
+#define AUKeyPopOut @"aura.popout"                // off until switched on: the objects step out of the cover's frame
+#define AUKeyCutoutObjects @"aura.cutout.objects" // (retired)
+#define AUKeyScenePeopleOnly @"aura.scene.peopleOnly" // off: every subject on the cover gets a layer
 #define AUKeyUpscale @"aura.upscale"
 
 BOOL AUEnabled(NSString *key);   // unset is on

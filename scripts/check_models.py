@@ -87,9 +87,28 @@ def test_upscale(root):
     print(f"     upscale: {ms:.1f} ms a 128 px tile on this Mac (CPU + ANE)")
 
 
+def test_inpaint(root):
+    package = fetch("lama-512-f32", root)
+    model = ct.models.MLModel(package, compute_units=ct.ComputeUnit.CPU_ONLY)
+    # A smooth gradient with a hole: the filled hole must continue the gradient, not stay black.
+    xs = np.linspace(0, 255, 512, dtype=np.float32)
+    img = np.stack([np.tile(xs, (512, 1)), np.tile(xs[::-1], (512, 1)), np.full((512, 512), 128, np.float32)], -1).astype(np.uint8)
+    holed = img.copy()
+    holed[200:300, 150:250] = 0
+    mask = np.zeros((512, 512), np.uint8)
+    mask[200:300, 150:250] = 255
+    out, ms = timed(model, {"image": Image.fromarray(holed), "mask": Image.fromarray(mask, "L")}, runs=3)
+    filled = np.asarray(out["filled"].convert("RGB"), dtype=np.float32)
+    err = np.abs(filled[200:300, 150:250] - img[200:300, 150:250].astype(np.float32)).mean()
+    check(filled.shape == (512, 512, 3), f"inpaint: output {filled.shape}")
+    check(err < 40, f"inpaint: the hole continues the picture (mean error {err:.1f} of 255)")
+    print(f"     inpaint: {ms:.0f} ms a 512x512 canvas on this Mac (CPU, fp32)")
+
+
 with tempfile.TemporaryDirectory() as root:
     test_depth(root)
     test_upscale(root)
+    test_inpaint(root)
 if failures:
     print(f"{failures} check(s) failed")
     sys.exit(1)

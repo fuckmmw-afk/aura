@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Big-LaMa (advimman/lama, Apache-2.0) -> Core ML, one fixed 384 x 512 (w x h) canvas.
+"""Big-LaMa (advimman/lama, Apache-2.0) -> Core ML, one fixed 512 x 512 canvas, computed in fp32: in fp16 the
+Fourier units' sums overflow on the phone's Neural Engine and the fill comes out as noise.
 
 LaMa's Fourier units use torch.fft.rfftn / irfftn. At a fixed size they are exact matrix products with the discrete
 Fourier transform's cos/sin matrices, which Core ML runs (on the Neural Engine too), so the units are rewritten that
@@ -14,7 +15,7 @@ import torch
 import torch.nn as nn
 
 LAMA, WEIGHTS, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
-W, H = 384, 512
+W, H = 512, 512
 sys.path.insert(0, LAMA)
 import types  # noqa: E402
 for name in ('pytorch_lightning',):
@@ -153,15 +154,15 @@ def main():
         inputs=[ct.ImageType(name='image', shape=img.shape, scale=1 / 255.0, color_layout=ct.colorlayout.RGB),
                 ct.ImageType(name='mask', shape=mask.shape, scale=1 / 255.0, color_layout=ct.colorlayout.GRAYSCALE)],
         outputs=[ct.ImageType(name='filled', color_layout=ct.colorlayout.RGB)],
-        compute_precision=ct.precision.FLOAT16,
+        compute_precision=ct.precision.FLOAT32,
         minimum_deployment_target=ct.target.iOS17,
         convert_to='mlprogram',
     )
     import coremltools.optimize.coreml as cto
-    # Only the convolutions: the Fourier matrices (64 x 64 at most) stay exact.
-    config = cto.OptimizationConfig(global_config=cto.OpPalettizerConfig(mode='kmeans', nbits=8, weight_threshold=8192))
-    mlmodel = cto.palettize_weights(mlmodel, config)
-    mlmodel.short_description = 'Big-LaMa inpainting (advimman/lama, Apache-2.0), 384x512, 8-bit palettized'
+    # 8-bit weights, per channel, only for the convolutions: the Fourier matrices (64 x 64 at most) stay exact.
+    config = cto.OptimizationConfig(global_config=cto.OpLinearQuantizerConfig(mode='linear_symmetric', weight_threshold=8192))
+    mlmodel = cto.linear_quantize_weights(mlmodel, config)
+    mlmodel.short_description = 'Big-LaMa inpainting (advimman/lama, Apache-2.0), 512x512, fp32 compute, int8 weights'
     mlmodel.license = 'Apache-2.0'
     mlmodel.save(OUT)
     print('saved', OUT)

@@ -1,7 +1,6 @@
 #import "AULockScreen.h"
 #import "Core/AUCore.h"
 #import "Features/AUImage.h"
-#import "Features/AUDepthLayers.h"
 #import <AVFoundation/AVFoundation.h>
 #import <Accelerate/Accelerate.h>
 #import <TargetConditionals.h>
@@ -13,25 +12,25 @@
 #import "Features/AUPipeline.h"
 #endif
 
-static const int32_t kFPS = 24, kLoopSeconds = 6;
-static const double kStrength = 0.04;
+static const int32_t kFPS = 30, kLoopSeconds = 6;
+static const double kStrength = 0.05, kBackgroundShare = 0.25;
 
 #pragma mark - the clip, on the CPU
 //
 // The clip is made when the lock screen asks for it, and Spotify is then in the background, where iOS lets no app
-// use the GPU (a Metal frame comes out black). So it is drawn on the CPU, as the app's Metal one is: the cover bent
-// by its softened depth map as the camera circles (each pixel moved by its depth, sampled bilinearly, the rows
-// split over the cores), the subject in front with its shadow baked in, and a shade at the foot for the controls.
+// use the GPU. It needs none: the scene's layers are scaled to the frame once, and each frame is the background and
+// the objects drawn at their offsets as the camera circles, plus a shade at the foot for the lock screen's controls.
 
 typedef struct {
-    uint8_t *source;            // the picture, BGRA premultiplied, the canvas's size (the frame with a margin)
-    size_t sourceRow;
-    uint8_t *depth;             // the depth map at the canvas's size, near bright
-    uint8_t *blurred;           // the picture softened, for the room a near thing uncovers (as the app's mip levels)
-    CGImageRef subject;         // with its shadow, the canvas's size, or NULL
+    CGImageRef background;        // drawn at the picture's size
+    CGImageRef objects[8];
+    double weights[8];
+    int count;
     CGImageRef shade;
-    CGSize size, canvas;
-    double side, margin;
+    CGSize size;
+    CGRect picture;               // where the square is drawn in the frame (origin bottom left), zoomed
+    CGRect backgroundRect;        // where the background (fill + square, with a margin) is drawn
+    double side;
     BOOL moving;
 } AUClipLayers;
 
@@ -46,49 +45,95 @@ static CGContextRef bgraContext(size_t width, size_t height, void *data, size_t 
     return context;
 }
 
-static AUClipLayers makeLayers(AULockClipInput input, CGSize size, BOOL moving) {
+static CGImageRef scaled(CGImageRef image, CGSize size) {
+    CGContextRef c = bgraContext((size_t)ceil(size.width), (size_t)ceil(size.height), NULL, 0);
+    if (!c) return NULL;
+    CGContextSetInterpolationQuality(c, kCGInterpolationHigh);
+    CGContextDrawImage(c, CGRectMake(0, 0, ceil(size.width), ceil(size.height)), image);
+    CGImageRef made = CGBitmapContextCreateImage(c);
+    CGContextRelease(c);
+    return made;
+}
+
+// The cover blurred and filled over the whole frame, made on the CPU (vImage over a small copy): the lock screen's
+// room above and below the square cover, as Apple stretches a cover there.
+static CGImageRef blurredFill(CGImageRef cover, CGSize size) {
+    size_t sw = 96, sh = (size_t)round(96 * size.height / size.width);
+    CGContextRef small = bgraContext(sw, sh, NULL, 0);
+    double scale = MAX(sw / (double)CGImageGetWidth(cover), sh / (double)CGImageGetHeight(cover));
+    double w = CGImageGetWidth(cover) * scale, h = CGImageGetHeight(cover) * scale;
+    CGContextSetInterpolationQuality(small, kCGInterpolationHigh);
+    CGContextDrawImage(small, CGRectMake((sw - w) / 2, (sh - h) / 2, w, h), cover);
+    vImage_Buffer a = {CGBitmapContextGetData(small), sh, sw, CGBitmapContextGetBytesPerRow(small)};
+    NSMutableData *scratch = [NSMutableData dataWithLength:a.rowBytes * sh];
+    vImage_Buffer b = {scratch.mutableBytes, sh, sw, a.rowBytes};
+    for (int pass = 0; pass < 3; pass++) {
+        vImageBoxConvolve_ARGB8888(&a, &b, NULL, 0, 0, 9, 9, NULL, kvImageEdgeExtend);
+        vImageBoxConvolve_ARGB8888(&b, &a, NULL, 0, 0, 9, 9, NULL, kvImageEdgeExtend);
+    }
+    CGImageRef tiny = CGBitmapContextCreateImage(small);
+    CGContextRelease(small);
+    CGImageRef made = scaled(tiny, size);
+    CGImageRelease(tiny);
+    return made;
+}
+
+// A mask the square's size, opaque but for a soft fade along its top and bottom edges, so it melts into the fill.
+static CGImageRef edgeFade(size_t side) {
+    NSMutableData *bytes = [NSMutableData dataWithLength:side * side];
+    uint8_t *p = bytes.mutableBytes;
+    double band = side * 0.10;
+    for (size_t y = 0; y < side; y++) {
+        double t = MIN(1.0, MIN(y, side - 1 - y) / band);
+        memset(p + y * side, (int)lround(255 * t * t * (3 - 2 * t)), side);
+    }
+    CFDataRef data = CFDataCreate(NULL, p, (CFIndex)(side * side));
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
+    CFRelease(data);
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    CGImageRef mask = CGImageCreate(side, side, 8, 8, side, gray, (CGBitmapInfo)kCGImageAlphaNone, provider, NULL, NO, kCGRenderingIntentDefault);
+    CGColorSpaceRelease(gray);
+    CGDataProviderRelease(provider);
+    return mask;
+}
+
+static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     AUClipLayers l;
     memset(&l, 0, sizeof(l));
     l.size = size;
-    l.moving = moving && input.depth;
-    double zoom = l.moving ? 1 + 1.1 * kStrength : 1.0;
-    l.side = MAX(size.width, size.height) * zoom;
-    l.margin = l.moving ? ceil(kStrength * l.side * 0.55) + 2 : 0;
-    l.canvas = CGSizeMake(size.width + 2 * l.margin, size.height + 2 * l.margin);
-    size_t cw = (size_t)l.canvas.width, ch = (size_t)l.canvas.height;
-    CGRect rect = CGRectMake((l.canvas.width - l.side) / 2, (l.canvas.height - l.side) / 2, l.side, l.side);
-    l.sourceRow = cw * 4;
-    l.source = calloc(l.sourceRow * ch, 1);
-    CGContextRef source = bgraContext(cw, ch, l.source, l.sourceRow);
-    CGContextSetInterpolationQuality(source, kCGInterpolationHigh);
-    CGContextDrawImage(source, rect, input.color);
-    CGContextRelease(source);
-    if (l.moving) {
-        uint8_t *depth = calloc(cw * ch, 1);
-        CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
-        CGContextRef d = CGBitmapContextCreate(depth, cw, ch, 8, cw, gray, (CGBitmapInfo)kCGImageAlphaNone);
-        CGColorSpaceRelease(gray);
-        CGContextSetInterpolationQuality(d, kCGInterpolationHigh);
-        CGContextDrawImage(d, rect, input.depth);
-        CGContextRelease(d);
-        l.depth = depth;
-        l.blurred = malloc(l.sourceRow * ch);
-        uint8_t *scratch = malloc(l.sourceRow * ch);
-        uint32_t k = (uint32_t)(l.side / 90) | 1;
-        vImage_Buffer a = {l.source, ch, cw, l.sourceRow}, b = {scratch, ch, cw, l.sourceRow}, c = {l.blurred, ch, cw, l.sourceRow};
-        vImageBoxConvolve_ARGB8888(&a, &b, NULL, 0, 0, k, k, NULL, kvImageEdgeExtend);
-        vImageBoxConvolve_ARGB8888(&b, &c, NULL, 0, 0, k, k, NULL, kvImageEdgeExtend);
-        free(scratch);
+    l.moving = moving && scene.layers.count;
+    // The square across the frame's width (zoomed a touch for the moves), a little above the middle, the blurred
+    // cover filling the rest.
+    double zoom = l.moving ? 1 + 2.2 * kBackgroundShare * kStrength : 1.0;
+    double side = size.width * zoom;
+    l.side = side;
+    double top = (size.height - side) * 0.42;
+    l.picture = CGRectMake((size.width - side) / 2, size.height - top - side, side, side);
+    // The background as one image the frame's size, with margin for its own move: fill, then the square faded in.
+    double margin = ceil(kBackgroundShare * kStrength * side) + 2;
+    CGSize baseSize = CGSizeMake(size.width + 2 * margin, size.height + 2 * margin);
+    CGContextRef base = bgraContext((size_t)baseSize.width, (size_t)baseSize.height, NULL, 0);
+    CGImageRef fill = blurredFill(scene.background.CGImage, baseSize);
+    if (fill) {
+        CGContextDrawImage(base, CGRectMake(0, 0, baseSize.width, baseSize.height), fill);
+        CGImageRelease(fill);
     }
-    if (input.subject) {
-        CGContextRef s = bgraContext(cw, ch, NULL, 0);
-        CGContextSetInterpolationQuality(s, kCGInterpolationHigh);
-        CGColorRef shadow = CGColorCreateSRGB(0, 0, 0, 0.5);
-        CGContextSetShadowWithColor(s, CGSizeMake(0, -10), 22, shadow);
-        CGColorRelease(shadow);
-        CGContextDrawImage(s, rect, input.subject);
-        l.subject = CGBitmapContextCreateImage(s);
-        CGContextRelease(s);
+    CGImageRef fade = edgeFade((size_t)side);
+    CGRect inBase = CGRectOffset(l.picture, margin, margin);
+    CGContextSaveGState(base);
+    CGContextSetInterpolationQuality(base, kCGInterpolationHigh);
+    CGContextClipToMask(base, inBase, fade);
+    CGContextDrawImage(base, inBase, scene.background.CGImage);
+    CGContextRestoreGState(base);
+    CGImageRelease(fade);
+    l.background = CGBitmapContextCreateImage(base);
+    CGContextRelease(base);
+    l.backgroundRect = CGRectMake(-margin, -margin, baseSize.width, baseSize.height);
+    for (AUSceneLayer *object in scene.layers) {
+        if (l.count >= 8) break;
+        l.objects[l.count] = scaled(object.image.CGImage, CGSizeMake(side, side));
+        l.weights[l.count] = [scene weightOf:object];
+        l.count++;
     }
     CGContextRef shade = bgraContext((size_t)size.width, (size_t)size.height, NULL, 0);
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
@@ -104,113 +149,40 @@ static AUClipLayers makeLayers(AULockClipInput input, CGSize size, BOOL moving) 
 }
 
 static void freeLayers(AUClipLayers *l) {
-    free(l->source);
-    free(l->depth);
-    free(l->blurred);
-    if (l->subject) CGImageRelease(l->subject);
+    if (l->background) CGImageRelease(l->background);
+    for (int i = 0; i < l->count; i++) if (l->objects[i]) CGImageRelease(l->objects[i]);
     if (l->shade) CGImageRelease(l->shade);
     memset(l, 0, sizeof(*l));
 }
 
-// Steep parallax into `pixels` (BGRA, rows from the top, `rowBytes` apart), as the app's shader does it: for each
-// pixel the depth map is marched from the near plane down until the surface is met, so each thing moves whole at its
-// depth and the near hides the far; the colour there is sampled bilinearly. Down the screen is +y as in the app.
-static void warp(AUClipLayers *l, uint8_t *pixels, size_t rowBytes, CGPoint tilt) {
-    size_t w = (size_t)l->size.width, h = (size_t)l->size.height, cw = (size_t)l->canvas.width, ch = (size_t)l->canvas.height;
-    float m = (float)l->margin;
-    const uint8_t *src = l->source, *depth = l->depth, *soft = l->blurred;
-    size_t srcRow = l->sourceRow;
-    float ox = (float)(tilt.x * kStrength * l->side), oy = (float)(tilt.y * kStrength * l->side);
-    float shift = hypotf(ox, oy), dx = shift > 0 ? ox / shift : 0, dy = shift > 0 ? oy / shift : 0;
-    size_t chunk = 16;
-    dispatch_apply((h + chunk - 1) / chunk, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t c) {
-        size_t y0 = c * chunk, y1 = MIN(h, y0 + chunk);
-        for (size_t y = y0; y < y1; y++) {
-            uint32_t *out = (uint32_t *)(pixels + y * rowBytes);
-            for (size_t x = 0; x < w; x++) {
-                float px = x + m, py = y + m;
-                #define DEPTH_AT(layer) ({ \
-                    float qx = px - ox * ((layer) - 0.5f), qy = py - oy * ((layer) - 0.5f); \
-                    long ix = lroundf(qx), iy = lroundf(qy); \
-                    if (ix < 0) ix = 0; if (iy < 0) iy = 0; if (ix >= (long)cw) ix = cw - 1; if (iy >= (long)ch) iy = ch - 1; \
-                    depth[iy * cw + ix] / 255.0f; })
-                const int steps = 12;
-                float layer = 1, step = 1.0f / steps, d = DEPTH_AT(layer), prevLayer = layer, prevD = d;
-                for (int i = 0; i < steps && d < layer; i++) {
-                    prevLayer = layer;
-                    prevD = d;
-                    layer -= step;
-                    d = DEPTH_AT(layer);
-                }
-                #undef DEPTH_AT
-                float before = prevD - prevLayer, after = d - layer;
-                float t = before / (before - after + 1e-5f);
-                t = t < 0 ? 0 : (t > 1 ? 1 : t);
-                float hit = prevLayer + (layer - prevLayer) * t;
-                float sx = px - ox * (hit - 0.5f), sy = py - oy * (hit - 0.5f);
-                if (sx < 0) sx = 0;
-                if (sy < 0) sy = 0;
-                if (sx > cw - 1.001f) sx = cw - 1.001f;
-                if (sy > ch - 1.001f) sy = ch - 1.001f;
-                size_t ix = (size_t)sx, iy = (size_t)sy;
-                // Beside a depth step the colour is uncovered room: it is mixed toward the softened picture by how big
-                // the step and the shift are, as the shader picks a blurrier mip level.
-                long ax = lroundf(sx + dx * 4), ay = lroundf(sy + dy * 4), bx = lroundf(sx - dx * 4), by = lroundf(sy - dy * 4);
-                ax = ax < 0 ? 0 : (ax >= (long)cw ? (long)cw - 1 : ax); bx = bx < 0 ? 0 : (bx >= (long)cw ? (long)cw - 1 : bx);
-                ay = ay < 0 ? 0 : (ay >= (long)ch ? (long)ch - 1 : ay); by = by < 0 ? 0 : (by >= (long)ch ? (long)ch - 1 : by);
-                float edge = fabsf((float)depth[ay * cw + ax] - (float)depth[by * cw + bx]) / 255.0f;
-                float mixSoft = fminf(1.0f, edge * shift / 10.0f);
-                uint32_t ms = (uint32_t)(mixSoft * 256);
-                uint32_t fx = (uint32_t)((sx - ix) * 256), fy = (uint32_t)((sy - iy) * 256);
-                size_t at = iy * srcRow + ix * 4;
-                const uint8_t *p00 = src + at, *p10 = p00 + 4, *p01 = p00 + srcRow, *p11 = p01 + 4;
-                const uint8_t *q00 = soft + at, *q10 = q00 + 4, *q01 = q00 + srcRow, *q11 = q01 + 4;
-                uint32_t result = 0;
-                for (int k = 0; k < 4; k++) {
-                    uint32_t top = p00[k] * (256 - fx) + p10[k] * fx, bottom = p01[k] * (256 - fx) + p11[k] * fx;
-                    uint32_t sharp = (top * (256 - fy) + bottom * fy) >> 16;
-                    uint32_t softTop = q00[k] * (256 - fx) + q10[k] * fx, softBottom = q01[k] * (256 - fx) + q11[k] * fx;
-                    uint32_t blurred = (softTop * (256 - fy) + softBottom * fy) >> 16;
-                    result |= ((sharp * (256 - ms) + blurred * ms) >> 8) << (k * 8);
-                }
-                out[x] = result;
-            }
-        }
-    });
-}
-
-static void drawFrame(CGContextRef context, AUClipLayers *l, double phase, BOOL moving) {
-    CGPoint tilt = moving && l->moving ? tiltAt(phase) : CGPointZero;
-    size_t w = (size_t)l->size.width, h = (size_t)l->size.height;
-    uint8_t *pixels = CGBitmapContextGetData(context);
-    if (l->moving && pixels) {
-        warp(l, pixels, CGBitmapContextGetBytesPerRow(context), tilt);
-    } else {
-        // Still: the picture straight from the canvas's middle.
-        size_t m = (size_t)l->margin, row = CGBitmapContextGetBytesPerRow(context);
-        for (size_t y = 0; y < h && pixels; y++) memcpy(pixels + y * row, l->source + (y + m) * l->sourceRow + m * 4, w * 4);
-    }
-    if (l->subject) {
-        double amount = l->moving ? kStrength * l->side * (AUSubjectDepth - 0.5) : 0;
-        CGContextSetInterpolationQuality(context, kCGInterpolationLow);
-        CGContextDrawImage(context, CGRectMake(-l->margin + tilt.x * amount, -l->margin - tilt.y * amount, l->canvas.width, l->canvas.height), l->subject);
+// Down the screen is +y in the app; Core Graphics counts from the bottom, so the tilt's y is turned over.
+static void drawFrame(CGContextRef context, AUClipLayers *l, double phase) {
+    CGPoint tilt = l->moving ? tiltAt(phase) : CGPointZero;
+    CGContextSetInterpolationQuality(context, kCGInterpolationLow);
+    CGContextSetBlendMode(context, kCGBlendModeCopy);
+    double back = -kBackgroundShare * kStrength * l->side;
+    CGContextDrawImage(context, CGRectOffset(l->backgroundRect, tilt.x * back, -tilt.y * back), l->background);
+    CGContextSetBlendMode(context, kCGBlendModeNormal);
+    for (int i = 0; i < l->count; i++) {
+        double amount = l->weights[i] * kStrength * l->side;
+        CGContextDrawImage(context, CGRectOffset(l->picture, tilt.x * amount, -tilt.y * amount), l->objects[i]);
     }
     CGContextDrawImage(context, CGRectMake(0, 0, l->size.width, l->size.height), l->shade);
 }
 
-CGImageRef AULockClipFrame(AULockClipInput input, CGSize size, double phase, BOOL moving) {
-    if (!input.color || size.width < 1 || size.height < 1) return NULL;
-    AUClipLayers l = makeLayers(input, size, moving);
+CGImageRef AULockClipFrame(AUScene *scene, CGSize size, double phase, BOOL moving) {
+    if (!scene.background || size.width < 1 || size.height < 1) return NULL;
+    AUClipLayers l = makeLayers(scene, size, moving);
     CGContextRef context = bgraContext((size_t)size.width, (size_t)size.height, NULL, 0);
-    drawFrame(context, &l, phase, moving);
+    drawFrame(context, &l, phase);
     CGImageRef frame = CGBitmapContextCreateImage(context);
     CGContextRelease(context);
     freeLayers(&l);
     return frame;
 }
 
-BOOL AULockClipWrite(NSURL *file, AULockClipInput input, CGSize size, BOOL moving) {
-    if (!input.color || size.width < 16 || size.height < 16) return NO;
+BOOL AULockClipWrite(NSURL *file, AUScene *scene, CGSize size, BOOL moving) {
+    if (!scene.background || size.width < 16 || size.height < 16) return NO;
     double started = AUNowMs();
     NSURL *partial = [file URLByAppendingPathExtension:@"partial.mp4"];
     [NSFileManager.defaultManager removeItemAtURL:partial error:nil];
@@ -236,9 +208,8 @@ BOOL AULockClipWrite(NSURL *file, AULockClipInput input, CGSize size, BOOL movin
         return NO;
     }
     [writer startSessionAtSourceTime:kCMTimeZero];
-    AUClipLayers l = makeLayers(input, size, moving);
-    double prepared = AUNowMs();
-    int32_t frames = moving ? kLoopSeconds * kFPS : kFPS;
+    AUClipLayers l = makeLayers(scene, size, moving);
+    int32_t frames = l.moving ? kLoopSeconds * kFPS : kFPS;
     BOOL ok = YES;
     for (int32_t index = 0; index < frames && ok; index++) {
         @autoreleasepool {
@@ -250,7 +221,7 @@ BOOL AULockClipWrite(NSURL *file, AULockClipInput input, CGSize size, BOOL movin
             CVPixelBufferLockBaseAddress(buffer, 0);
             CGContextRef context = bgraContext((size_t)width, (size_t)height, CVPixelBufferGetBaseAddress(buffer), CVPixelBufferGetBytesPerRow(buffer));
             if (context) {
-                drawFrame(context, &l, (double)index / frames, moving);
+                drawFrame(context, &l, (double)index / frames);
                 CGContextRelease(context);
             }
             CVPixelBufferUnlockBaseAddress(buffer, 0);
@@ -258,6 +229,7 @@ BOOL AULockClipWrite(NSURL *file, AULockClipInput input, CGSize size, BOOL movin
             CVPixelBufferRelease(buffer);
         }
     }
+    BOOL wasMoving = l.moving;
     freeLayers(&l);
     if (!ok) {
         AULog(@"lock screen: clip not written: %@", writer.error.localizedDescription ?: @"?");
@@ -278,8 +250,7 @@ BOOL AULockClipWrite(NSURL *file, AULockClipInput input, CGSize size, BOOL movin
     [NSFileManager.defaultManager removeItemAtURL:file error:nil];
     BOOL moved = [NSFileManager.defaultManager moveItemAtURL:partial toURL:file error:nil];
     NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:file.path error:nil];
-    AULog(@"lock screen: %@ clip %dx%d in %.0f ms (layers %.0f ms), %@", moving ? @"3D" : @"still", width, height,
-          AUNowMs() - started, prepared - started, AUBytes(attributes.fileSize));
+    AULog(@"lock screen: %@ clip %dx%d in %.0f ms, %@", wasMoving ? @"3D" : @"still", width, height, AUNowMs() - started, AUBytes(attributes.fileSize));
     return moved;
 }
 
@@ -356,7 +327,7 @@ static UIImage *filled(UIImage *image, CGSize size) {
 
 // What the clip of a track is made from, read on the main queue from the pipeline's artwork for that very track.
 @interface AULockMaterial : NSObject
-@property (nonatomic, strong) UIImage *color, *depth, *subject;
+@property (nonatomic, strong) AUScene *scene;
 @property (nonatomic) BOOL moving;
 @property (nonatomic, copy) NSString *signature;
 @end
@@ -365,20 +336,26 @@ static UIImage *filled(UIImage *image, CGSize size) {
 @end
 
 static BOOL settled(AUArtwork *artwork, BOOL moving) {
-    BOOL wantDepth = moving && AUEnabled(AUKeyDepth), wantSubject = AUFlag(AUKeyPopOut);
-    return artwork.source && (!wantDepth || artwork.depth) && (!wantSubject || artwork.cutout || artwork.noSubject);
+    BOOL wantScene = AUEnabled(AUKeyDepth);
+    return artwork.source && (!wantScene || artwork.sceneChecked);
+}
+
+// The cover alone as a scene (no objects), for a cover without one.
+static AUScene *plainScene(UIImage *source) {
+    AUScene *scene = [AUScene new];
+    scene.background = source;
+    scene.square = CGRectMake(0, 0, source.size.width * source.scale, source.size.height * source.scale);
+    scene.layers = @[];
+    return scene;
 }
 
 static AULockMaterial *materialOf(AUArtwork *artwork, BOOL moving) {
     if (!artwork.source) return nil;
     AULockMaterial *material = [AULockMaterial new];
-    BOOL subject = AUFlag(AUKeyPopOut) && artwork.cutout && artwork.background;
-    BOOL depth = moving && AUEnabled(AUKeyDepth) && artwork.depth;
-    material.color = subject ? artwork.background : artwork.source;
-    material.depth = depth ? (subject ? (artwork.softDepth ?: artwork.depth) : artwork.depth) : nil;
-    material.subject = subject ? artwork.cutout : nil;
-    material.moving = depth;
-    material.signature = [NSString stringWithFormat:@"%@|%d%d|%d|v7", artwork.key, depth, subject, artwork.upscaled];
+    material.scene = artwork.scene ?: plainScene(artwork.source);
+    material.moving = moving && material.scene.layers.count;
+    material.signature = [NSString stringWithFormat:@"%@|%d|%lu|%d|%d|v8", artwork.key, material.moving, (unsigned long)material.scene.layers.count,
+                          material.scene.inpainted, artwork.upscaled];
     return material;
 }
 
@@ -475,8 +452,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
                 AULog(@"lock screen: no artwork for %@ in time", uri);
                 return;
             }
-            AULockClipInput input = {material.color.CGImage, material.depth.CGImage, material.subject.CGImage};
-            CGImageRef first = AULockClipFrame(input, size, 0, material.moving);
+            CGImageRef first = AULockClipFrame(material.scene, size, 0, material.moving);
             if (first) {
                 poster = [UIImage imageWithCGImage:first];
                 CGImageRelease(first);
@@ -484,7 +460,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
             NSString *name = [NSString stringWithFormat:@"%@-%.0fx%.0f.mp4", AUSHA1(material.signature), size.width, size.height];
             file = [clipFolder() URLByAppendingPathComponent:name];
         };
-        NSString *artworkID = [NSString stringWithFormat:@"aura-%@-%ld-v7", AUSHA1(uri), (long)mode];
+        NSString *artworkID = [NSString stringWithFormat:@"aura-%@-%ld-v8", AUSHA1(uri), (long)mode];
         MPMediaItemAnimatedArtwork *artwork = [[artworkClass alloc] initWithArtworkID:artworkID
             previewImageRequestHandler:^(CGSize wanted, void (^completion)(UIImage *)) {
                 dispatch_async(clipQueue(), ^{
@@ -501,8 +477,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
                     }
                     BOOL ready = [NSFileManager.defaultManager fileExistsAtPath:file.path];
                     if (!ready) {
-                        AULockClipInput input = {material.color.CGImage, material.depth.CGImage, material.subject.CGImage};
-                        ready = AULockClipWrite(file, input, size, material.moving);
+                        ready = AULockClipWrite(file, material.scene, size, material.moving);
                         pruneClips();
                     }
                     AULog(@"lock screen: video for %@ %@", [uri substringFromIndex:uri.length > 8 ? uri.length - 8 : 0], ready ? @"handed over" : @"failed");
@@ -515,8 +490,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
         dispatch_async(clipQueue(), ^{
             prepare();
             if (file && ![NSFileManager.defaultManager fileExistsAtPath:file.path]) {
-                AULockClipInput input = {material.color.CGImage, material.depth.CGImage, material.subject.CGImage};
-                AULockClipWrite(file, input, size, material.moving);
+                AULockClipWrite(file, material.scene, size, material.moving);
                 pruneClips();
                 AULog(@"lock screen: clip for %@ made ahead", [uriNow substringFromIndex:uriNow.length > 8 ? uriNow.length - 8 : 0]);
             }
