@@ -160,18 +160,27 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
 
 #pragma mark - the stages
 
+- (BOOL)sceneModelsReady {
+    for (NSString *model in @[AUModelInpaint, AUModelSamEncoder, AUModelSamPrompt, AUModelSamDecoder]) {
+        if ([AUModelManager.shared stateOf:model] != AUModelReady) return NO;
+    }
+    return YES;
+}
+
 - (void)work:(AUArtwork *)artwork image:(UIImage *)image {
     NSUInteger generation = ++_generation;
     BOOL wantTheme = AUEnabled(AUKeyTheme), wantDepth = AUEnabled(AUKeyDepth), wantScene = AUEnabled(AUKeyDepth);
     BOOL wantUpscale = AUEnabled(AUKeyUpscale), peopleOnly = AUFlag(AUKeyScenePeopleOnly), throttled = AUThrottled();
-    BOOL lamaReady = [AUModelManager.shared stateOf:AUModelInpaint] == AUModelReady;
+    BOOL lamaReady = [self sceneModelsReady];
     if (throttled) AULog(@"pipeline: hot (%@): the palette only", AUThermalName());
     BOOL needPalette = wantTheme && !artwork.palette;
     BOOL needSource = !artwork.source || (wantUpscale && !throttled && !artwork.upscaleChecked) || (!wantUpscale && artwork.upscaled);
     BOOL needDepth = (wantDepth || wantScene) && !artwork.depth && !throttled;
     BOOL needScene = wantScene && !throttled
-        && (!artwork.sceneChecked || artwork.scenePeopleOnly != peopleOnly || (artwork.scene && !artwork.scene.inpainted && lamaReady));
-    if (wantScene && !lamaReady) [AUModelManager.shared ensure:AUModelInpaint];
+        && (!artwork.sceneChecked || artwork.scenePeopleOnly != peopleOnly || (artwork.scene && !artwork.scene.complete && lamaReady));
+    if (wantScene && !lamaReady) {
+        for (NSString *model in @[AUModelInpaint, AUModelSamEncoder, AUModelSamPrompt, AUModelSamDecoder]) [AUModelManager.shared ensure:model];
+    }
     if (!needPalette && !needSource && !needDepth && !needScene) return;
     [self memoryStore:artwork];
     CGImageRef cgImage = CGImageRetain(image.CGImage);
@@ -281,9 +290,9 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
     // 4. The scene: the objects lifted onto layers, the background painted in under them and around the cover.
     if (needScene) {
         NSString *sceneFolder = [folder stringByAppendingPathComponent:peopleOnly ? @"scene-people" : @"scene"];
-        BOOL lamaReady = [AUModelManager.shared stateOf:AUModelInpaint] == AUModelReady;
+        BOOL lamaReady = [self sceneModelsReady];
         AUScene *scene = keep ? [AUScene readFrom:sceneFolder] : nil;
-        if (scene && !scene.inpainted && lamaReady) scene = nil;   // made while the model was still coming
+        if (scene && !scene.complete && lamaReady) scene = nil;   // made while the models were still coming
         if (!scene) {
             if ([self stale:generation]) {
                 if (depth) CGImageRelease(depth);

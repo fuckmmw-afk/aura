@@ -26,9 +26,9 @@ typedef struct {
     CGContextRef base;            // the background (square + the room around it), the frame's size and a margin all round
     CGImageRef background;        // the same, as a picture, for the still clip
     size_t margin;
-    CGContextRef objects[8];      // each object, premultiplied, the square's size
-    CGRect boxes[8];              // where each lies, picture units
-    double medians[8];
+    CGContextRef objects[16];     // each object, premultiplied, the square's size
+    CGRect boxes[16];             // where each lies, picture units
+    double medians[16];
     int count;
     CGImageRef shade;
     CGSize size;
@@ -85,7 +85,9 @@ static CGImageRef softened(CGImageRef image, double radius) {
 // The room above and below the square, as Apple fills it: the cover's own top and bottom rows carried out to the
 // frame's edges, then a blur that comes on by degrees — starting well inside the cover, barely there at its edge,
 // growing over a third of the screen — in three steps blended row by row, so there is no line where it starts.
-static void extendCover(CGContextRef base, CGRect square, double side) {
+// `square` is the picture (with the room painted below it, when there is one); the blur comes in from `from` to `to`
+// (rows) below, and over the same run above when the picture does not reach the top.
+static void extendCover(CGContextRef base, CGRect square, double side, double from, double to) {
     uint8_t *p = CGBitmapContextGetData(base);
     size_t row = CGBitmapContextGetBytesPerRow(base), w = CGBitmapContextGetWidth(base), h = CGBitmapContextGetHeight(base);
     long top = MAX(0L, MIN((long)h - 1, lround(CGRectGetMinY(square))));
@@ -112,10 +114,16 @@ static void extendCover(CGContextRef base, CGRect square, double side) {
         levelRows[k] = CGBitmapContextGetBytesPerRow(levels[k]);
     }
     double inside = side * 0.16, outside = side * 0.50;
+    double belowFrom = from, belowTo = MAX(from + 1, to);
     dispatch_apply(h, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t y) {
         long yy = (long)y;
-        double distance = yy < top ? top - yy : yy >= bottom ? yy - bottom + 1 : -(double)MIN(yy - top, bottom - 1 - yy);
-        double progress = MAX(0.0, MIN(1.0, (distance + inside) / (outside + inside)));
+        double progress;
+        if (yy >= (top + bottom) / 2) {
+            progress = MAX(0.0, MIN(1.0, (yy - belowFrom) / (belowTo - belowFrom)));
+        } else {
+            double distance = yy < top ? top - yy : -(double)(yy - top);
+            progress = top > 0 ? MAX(0.0, MIN(1.0, (distance + inside) / (outside + inside))) : 0;
+        }
         uint8_t *o = p + y * row;
         for (int k = 0; k < 3; k++) {
             double t = MAX(0.0, MIN(1.0, (progress - ranges[k][0]) / (ranges[k][1] - ranges[k][0])));
@@ -142,22 +150,30 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     double zoom = l.moving ? AUSceneZoom(l.strength) : 1.0;
     double side = size.width * zoom;
     l.side = side;
-    double top = (size.height - side) * 0.42;
+    // With the room painted below the cover, the cover sits at the top and the picture runs down the whole frame;
+    // without it, a little above the middle with its own rows carried out.
+    double tallness = scene.tall ? scene.tallness : 1;
+    double top = scene.tall ? (size.width - side) / 2 : (size.height - side) * 0.42;
     l.square = CGRectMake((size.width - side) / 2, top, side, side);
     size_t margin = l.moving ? (size_t)ceil(side * 0.2) : 0;
     l.margin = margin;
     CGSize baseSize = CGSizeMake(size.width + 2 * margin, size.height + 2 * margin);
     CGContextRef base = bgraContext((size_t)baseSize.width, (size_t)baseSize.height, NULL, 0);
     // Core Graphics counts from the bottom.
-    CGRect inBase = CGRectMake(l.square.origin.x + margin, baseSize.height - (top + margin) - side, side, side);
+    double pictureHigh = side * tallness;
+    CGRect inBase = CGRectMake(l.square.origin.x + margin, baseSize.height - (top + margin) - pictureHigh, side, pictureHigh);
     CGContextSetInterpolationQuality(base, kCGInterpolationHigh);
-    CGContextDrawImage(base, inBase, scene.background.CGImage);
-    CGRect squareTopDown = CGRectMake(inBase.origin.x, top + margin, side, side);
-    extendCover(base, squareTopDown, side);
+    CGContextDrawImage(base, inBase, (scene.tall ?: scene.background).CGImage);
+    CGRect pictureTopDown = CGRectMake(inBase.origin.x, top + margin, side, pictureHigh);
+    // The blur only at the foot: from 0.74 of the frame (the picture's own foot when it is shorter) to the bottom.
+    double footFrom = scene.tall ? margin + size.height * 0.74 : margin + top + side - side * 0.16;
+    double footTo = scene.tall ? margin + size.height * 1.0 : margin + top + side + side * 0.5;
+    footFrom = MIN(footFrom, margin + top + pictureHigh - side * 0.1);
+    extendCover(base, pictureTopDown, side, footFrom, MAX(footFrom + side * 0.15, footTo));
     l.background = CGBitmapContextCreateImage(base);
     l.base = base;
     for (AUSceneLayer *object in scene.layers) {
-        if (l.count >= 8) break;
+        if (l.count >= 16) break;
         CGContextRef c = bgraContext((size_t)side, (size_t)side, NULL, 0);
         if (!c) continue;
         CGContextSetInterpolationQuality(c, kCGInterpolationHigh);

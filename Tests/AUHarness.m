@@ -69,6 +69,39 @@ static CGImageRef sceneFrame(AUScene *scene, CGPoint tilt, CGSize size) {
     return out;
 }
 
+// Fill as the app lays it out: the screen (402 x 874 pt), the cover across its width x1.12 from the top and the room
+// painted below it, everything seen by the camera (no blur or fade: those are Core Animation's in the app).
+static CGImageRef fillFrame(AUScene *scene, CGPoint tilt, CGSize size) {
+    if (!scene.tall) return NULL;
+    size_t w = (size_t)size.width, h = (size_t)size.height;
+    double side0 = size.width * 1.12, drawn = side0 * AUSceneZoom(1);
+    CGRect square = CGRectMake((size.width - drawn) / 2, (side0 - drawn) / 2, drawn, drawn);
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGBitmapInfo info = kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big;
+    size_t side = CGImageGetWidth(scene.tall.CGImage), high = CGImageGetHeight(scene.tall.CGImage);
+    CGContextRef back = CGBitmapContextCreate(NULL, side, high, 8, 0, space, info);
+    CGContextRef c = CGBitmapContextCreate(NULL, w, h, 8, 0, space, info);
+    CGContextDrawImage(back, CGRectMake(0, 0, side, high), scene.tall.CGImage);
+    AUCamera camera = AUSceneCamera(scene, tilt, 1);
+    AUSceneSource source = {CGBitmapContextGetData(back), CGBitmapContextGetBytesPerRow(back), side, high,
+                            CGRectMake(0, 0, side, side), NO, 0, NO, CGRectNull};
+    AUSceneDraw3D(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), w, h, square, scene, camera, source);
+    CGContextRelease(back);
+    for (AUSceneLayer *layer in scene.layers) {
+        CGContextRef o = CGBitmapContextCreate(NULL, side, side, 8, 0, space, info);
+        CGContextDrawImage(o, CGRectMake(0, 0, side, side), layer.image.CGImage);
+        AUSceneSource object = {CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), side, side,
+                                CGRectMake(0, 0, side, side), YES, layer.depth, NO,
+                                AUSceneAlphaBox(CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), side)};
+        AUSceneDraw3D(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), w, h, square, scene, camera, object);
+        CGContextRelease(o);
+    }
+    CGColorSpaceRelease(space);
+    CGImageRef out = CGBitmapContextCreateImage(c);
+    CGContextRelease(c);
+    return out;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc < 3) {
@@ -78,7 +111,8 @@ int main(int argc, const char *argv[]) {
         outDir = @(argv[1]);
         [NSFileManager.defaultManager createDirectoryAtPath:outDir withIntermediateDirectories:YES attributes:nil error:nil];
         int failures = 0;
-        BOOL ready = waitForModel(AUModelDepth) & waitForModel(AUModelUpscale) & waitForModel(AUModelInpaint);
+        BOOL ready = waitForModel(AUModelDepth) & waitForModel(AUModelUpscale) & waitForModel(AUModelInpaint)
+            & waitForModel(AUModelSamEncoder) & waitForModel(AUModelSamPrompt) & waitForModel(AUModelSamDecoder);
         if (!ready) failures++;
         for (int a = 2; a < argc; a++) {
             NSString *path = @(argv[a]), *name = path.lastPathComponent.stringByDeletingPathExtension;
@@ -98,6 +132,7 @@ int main(int argc, const char *argv[]) {
             if (!scene || !scene.inpainted) failures++;
             save(scene.background.CGImage, [name stringByAppendingString:@"-2-background.png"]);
             save(scene.plateDepth.CGImage, [name stringByAppendingString:@"-2-plate-depth.png"]);
+            save(scene.tall.CGImage, [name stringByAppendingString:@"-2-tall.png"]);
             for (NSUInteger i = 0; i < scene.layers.count; i++) {
                 save(scene.layers[i].image.CGImage, [NSString stringWithFormat:@"%@-3-layer%lu.png", name, (unsigned long)i]);
             }
@@ -113,7 +148,7 @@ int main(int argc, const char *argv[]) {
                     // The app's own shader: the same scene on Metal, to see it compiles and agrees with the CPU copy.
                     if ([AUSceneRenderer supported]) {
                         AUSceneRenderer *renderer = [AUSceneRenderer new];
-                        [renderer setScene:scene];
+                        [renderer setScene:scene tall:NO];
                         renderer.zoom = AUSceneZoom(1);
                         renderer.tilt = tilt;
                         CGImageRef gpu = nil;
@@ -125,7 +160,7 @@ int main(int argc, const char *argv[]) {
                     } else if (i == 0) {
                         printf("  no Metal device\n");
                     }
-                    CGImageRef fill = sceneFrame(scene, tilt, CGSizeMake(402, 546));
+                    CGImageRef fill = fillFrame(scene, tilt, CGSizeMake(402, 874));
                     save(fill, [NSString stringWithFormat:@"%@-5-fill-%d.png", name, i]);
                     if (fill) CGImageRelease(fill);
                 }

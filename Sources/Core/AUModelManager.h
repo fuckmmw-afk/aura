@@ -8,6 +8,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 #define AUModelDepth @"depth-v2s-p8"     // Depth Anything V2 Small, 8-bit palettized (Apple, Apache-2.0)
 #define AUModelUpscale @"esrgan-x4v3"    // Real-ESRGAN realesr-general-x4v3, 128px tiles (BSD-3-Clause)
+#define AUModelSamEncoder @"sam21t-enc"   // Segment Anything 2.1 Tiny, image encoder (Apple Core ML, Apache-2.0)
+#define AUModelSamPrompt @"sam21t-prompt" // ... its point encoder
+#define AUModelSamDecoder @"sam21t-dec"   // ... its mask decoder
 #define AUModelInpaint @"lama-256"       // Big-LaMa inpainting, 256 x 256, fp16 with pre-scaled Fourier matrices, 8-bit palettes, CPU (Apache-2.0)
 
 typedef NS_ENUM(NSInteger, AUModelState) {

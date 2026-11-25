@@ -68,9 +68,23 @@ static const NSTimeInterval kIdleUnload = 300;
     inpaint.license = @"Apache-2.0 · advimman/lama";
     inpaint.approximateSize = 52000000;
     inpaint.idle = 90;
+    NSMutableArray<AUModelEntry *> *sam = [NSMutableArray array];
+    NSArray *samParts = @[@[AUModelSamEncoder, @"SAM 2.1 Tiny (объекты)", @67224493], @[AUModelSamPrompt, @"SAM 2.1 Tiny · точки", @2122291],
+                          @[AUModelSamDecoder, @"SAM 2.1 Tiny · маски", @10298184]];
+    for (NSArray *part in samParts) {
+        AUModelEntry *entry = [AUModelEntry new];
+        entry.modelID = part[0];
+        entry.version = 1;
+        entry.title = part[1];
+        entry.license = @"Apache-2.0 · Meta / Apple Core ML";
+        entry.approximateSize = [part[2] unsignedLongLongValue];
+        entry.idle = 60;
+        [sam addObject:entry];
+    }
     depth.idle = kIdleUnload;
     upscale.idle = kIdleUnload;
-    _entries = @{depth.modelID: depth, upscale.modelID: upscale, inpaint.modelID: inpaint};
+    _entries = @{depth.modelID: depth, upscale.modelID: upscale, inpaint.modelID: inpaint,
+                 sam[0].modelID: sam[0], sam[1].modelID: sam[1], sam[2].modelID: sam[2]};
     for (AUModelEntry *entry in _entries.allValues) {
         entry.state = [NSFileManager.defaultManager fileExistsAtPath:[self compiledURL:entry].path] ? AUModelReady : AUModelMissing;
     }

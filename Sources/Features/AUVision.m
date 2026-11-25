@@ -1,5 +1,6 @@
 #import "AUVision.h"
 #import "AUImage.h"
+#import "AUSam.h"
 #import "Core/AUCompat.h"
 #import "Core/AUCore.h"
 #import "Core/AUModelManager.h"
@@ -691,7 +692,7 @@ static CGImageRef lamaFill(MLModel *model, CGImageRef cover, const uint8_t *hole
     CGContextRelease(ic);
     NSMutableData *maskBytes = [NSMutableData dataWithLength:W * H];
     uint8_t *mb = maskBytes.mutableBytes;
-    size_t top = (size_t)squareIn512.origin.y, bottom = (size_t)CGRectGetMaxY(squareIn512);
+    size_t top = (size_t)MAX(0.0, squareIn512.origin.y), bottom = (size_t)MAX(0.0, MIN((double)H, CGRectGetMaxY(squareIn512)));
     for (size_t y = 0; y < H; y++) {
         if (y < top || y >= bottom) memset(mb + y * W, 255, W);
     }
@@ -721,6 +722,37 @@ static CGImageRef lamaFill(MLModel *model, CGImageRef cover, const uint8_t *hole
     }
     CIImage *filled = [CIImage imageWithCVPixelBuffer:buffer];
     return rgba8(filled, filled.extent);
+}
+
+// The room below the cover, painted by LaMa so Fill and the lock screen run on down the screen with the cover's own
+// floor, grass or wall: the model sees the cover's lower part and a band under it, the band is taken from its answer.
+static CGImageRef outpaintBelow(MLModel *model, CGImageRef background, size_t side, double extra, NSString **error) {
+    MLImageConstraint *imageC = model.modelDescription.inputDescriptionsByName[@"image"].imageConstraint;
+    double W = imageC.pixelsWide, H = imageC.pixelsHigh;
+    if (!W || !H) return NULL;
+    // The cover drawn so its lower part fills the frame down to the band.
+    double drawn = W;              // the cover across the frame's width
+    double band = MIN(H * 0.5, drawn * extra);
+    double coverRows = H - band;   // the frame's rows the cover still shows
+    CGRect squareIn = CGRectMake(0, coverRows - drawn, drawn, drawn);
+    uint8_t *none = calloc(side * side, 1);
+    CGImageRef filled = lamaFill(model, background, none, side, side, squareIn, error);
+    free(none);
+    if (!filled) return NULL;
+    // The band (and a few rows above it to blend the seam), at the cover's scale.
+    size_t bandHigh = (size_t)lround(side * extra);
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef c = CGBitmapContextCreate(NULL, side, bandHigh, 8, 0, space, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    CGContextSetInterpolationQuality(c, kCGInterpolationHigh);
+    double scale = side / drawn;
+    // The model's frame scaled to the cover's size, placed so its band lands on this context.
+    CGRect frame = CGRectMake(0, 0, W * scale, H * scale);
+    CGContextDrawImage(c, frame, filled);
+    CGImageRelease(filled);
+    CGImageRef out = CGBitmapContextCreateImage(c);
+    CGContextRelease(c);
+    return out;
 }
 
 // An object that is really two things at clearly different depths (two people one behind the other, a person and the
@@ -801,18 +833,19 @@ static NSArray<NSData *> *depthParts(NSData *mask, const uint8_t *depth, size_t 
 
 // The background's depth: where the objects were, the depth around them carried in (normalized convolution at 128
 // px), then softened, so the plate bends smoothly and has no object edge left to tear along.
-static CGImageRef plateDepthOf(const uint8_t *depth, const uint8_t *holes, size_t side) {
-    enum { kSmall = 128 };
-    const size_t n = kSmall * kSmall;
+static CGImageRef plateDepthOf(const uint8_t *depth, const uint8_t *holes, size_t side, size_t height) {
+    // 128 px across, as tall as the canvas is.
+    const size_t kSmall = 128, kHigh = MAX((size_t)8, (size_t)lround(128.0 * height / side));
+    const size_t n = kSmall * kHigh;
     uint8_t *d = calloc(n, 1), *h = calloc(n, 1), *num = calloc(n, 1), *den = calloc(n, 1), *a = calloc(n, 1), *b = calloc(n, 1);
     CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
-    CGImageRef depthImage = AUGrayImage(depth, side, side), holesImage = AUGrayImage(holes, side, side);
-    CGContextRef dc = CGBitmapContextCreate(d, kSmall, kSmall, 8, kSmall, gray, (CGBitmapInfo)kCGImageAlphaNone);
+    CGImageRef depthImage = AUGrayImage(depth, side, height), holesImage = AUGrayImage(holes, side, height);
+    CGContextRef dc = CGBitmapContextCreate(d, kSmall, kHigh, 8, kSmall, gray, (CGBitmapInfo)kCGImageAlphaNone);
     CGContextSetInterpolationQuality(dc, kCGInterpolationHigh);
-    CGContextDrawImage(dc, CGRectMake(0, 0, kSmall, kSmall), depthImage);
+    CGContextDrawImage(dc, CGRectMake(0, 0, kSmall, kHigh), depthImage);
     CGContextRelease(dc);
-    CGContextRef hc = CGBitmapContextCreate(h, kSmall, kSmall, 8, kSmall, gray, (CGBitmapInfo)kCGImageAlphaNone);
-    CGContextDrawImage(hc, CGRectMake(0, 0, kSmall, kSmall), holesImage);
+    CGContextRef hc = CGBitmapContextCreate(h, kSmall, kHigh, 8, kSmall, gray, (CGBitmapInfo)kCGImageAlphaNone);
+    CGContextDrawImage(hc, CGRectMake(0, 0, kSmall, kHigh), holesImage);
     CGContextRelease(hc);
     CGColorSpaceRelease(gray);
     CGImageRelease(depthImage);
@@ -822,7 +855,7 @@ static CGImageRef plateDepthOf(const uint8_t *depth, const uint8_t *holes, size_
         num[i] = (uint8_t)((d[i] * keep + 127) / 255);
         den[i] = keep;
     }
-    vImage_Buffer nb = {num, kSmall, kSmall, kSmall}, db = {den, kSmall, kSmall, kSmall}, ab = {a, kSmall, kSmall, kSmall}, bb = {b, kSmall, kSmall, kSmall};
+    vImage_Buffer nb = {num, kHigh, kSmall, kSmall}, db = {den, kHigh, kSmall, kSmall}, ab = {a, kHigh, kSmall, kSmall}, bb = {b, kHigh, kSmall, kSmall};
     for (int pass = 0; pass < 2; pass++) {
         vImageTentConvolve_Planar8(&nb, &ab, NULL, 0, 0, 31, 31, 0, kvImageEdgeExtend);
         vImageTentConvolve_Planar8(&ab, &nb, NULL, 0, 0, 31, 31, 0, kvImageEdgeExtend);
@@ -836,7 +869,7 @@ static CGImageRef plateDepthOf(const uint8_t *depth, const uint8_t *holes, size_
     }
     // Softened well (a fifth of the side): a thing nobody lifted out bends with its surroundings, not on its own.
     vImageTentConvolve_Planar8(&ab, &bb, NULL, 0, 0, 25, 25, 0, kvImageEdgeExtend);
-    CGImageRef small = AUGrayImage(b, kSmall, kSmall);
+    CGImageRef small = AUGrayImage(b, kSmall, kHigh);
     free(d); free(h); free(num); free(den); free(a); free(b);
     return small;
 }
@@ -868,6 +901,24 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
             else [parts addObjectsFromArray:depthParts(mask, depthMap.bytes, n)];
         }
         masks = parts;
+    }
+    // Then every other object SAM sees that stands in front of what is around it: each sheep of a flock, a tree.
+    BOOL segmented = NO;
+    NSString *samLog = nil;
+    if (!peopleOnly && masks.count < 14) {
+        NSMutableData *held = [NSMutableData dataWithLength:n];
+        uint8_t *h = held.mutableBytes;
+        for (NSData *mask in masks) {
+            const uint8_t *m = mask.bytes;
+            for (size_t i = 0; i < n; i++) if (m[i] > h[i]) h[i] = m[i];
+        }
+        NSArray<NSData *> *more = AUSamObjects(square, side, depthMap.bytes, h, 14 - masks.count, &samLog);
+        if (more) {
+            segmented = YES;
+            masks = [masks arrayByAddingObjectsFromArray:more];
+        }
+    } else {
+        segmented = YES;
     }
     // The objects' room, grown a little so no fringe of theirs is left in the background.
     NSMutableData *unionMask = [NSMutableData dataWithLength:n], *grown = [NSMutableData dataWithLength:n];
@@ -982,7 +1033,31 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
             CGImageRelease(raw);
         }
         if (full) CGImageRelease(full);
-        CGImageRef plate = plateDepthOf(depthMap.bytes, g, side);
+        // The room below the cover (Fill, the lock screen), painted by LaMa; the depth carried down its rows.
+        CGImageRef below = lama && inpainted ? outpaintBelow(lama, background, side, 0.35, NULL) : NULL;
+        size_t tallHigh = side + (below ? CGImageGetHeight(below) : 0);
+        if (below) {
+            CGColorSpaceRef rgbSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            CGContextRef tc = CGBitmapContextCreate(NULL, side, tallHigh, 8, 0, rgbSpace, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
+            CGColorSpaceRelease(rgbSpace);
+            CGContextSetInterpolationQuality(tc, kCGInterpolationHigh);
+            CGContextDrawImage(tc, CGRectMake(0, tallHigh - side, side, side), background);
+            CGContextDrawImage(tc, CGRectMake(0, 0, side, CGImageGetHeight(below)), below);
+            CGImageRef tall = CGBitmapContextCreateImage(tc);
+            CGContextRelease(tc);
+            CGImageRelease(below);
+            if (tall) {
+                scene.tall = [UIImage imageWithCGImage:tall];
+                scene.tallness = tallHigh / (double)side;
+                CGImageRelease(tall);
+            }
+        }
+        if (!scene.tall) tallHigh = side;
+        NSMutableData *tallDepth = [NSMutableData dataWithLength:side * tallHigh], *tallHoles = [NSMutableData dataWithLength:side * tallHigh];
+        memcpy(tallDepth.mutableBytes, depthMap.bytes, n);
+        memcpy(tallHoles.mutableBytes, g, n);
+        for (size_t y = side; y < tallHigh; y++) memcpy((uint8_t *)tallDepth.mutableBytes + y * side, (const uint8_t *)depthMap.bytes + (side - 1) * side, side);
+        CGImageRef plate = plateDepthOf(tallDepth.bytes, tallHoles.bytes, side, tallHigh);
         if (plate) {
             scene.plateDepth = [UIImage imageWithCGImage:plate];
             CGImageRelease(plate);
@@ -995,11 +1070,13 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     scene.layers = layers;
     scene.backgroundDepth = backgroundDepth;
     scene.inpainted = inpainted;
+    scene.segmented = segmented;
     NSMutableArray *depths = [NSMutableArray array];
     for (AUSceneLayer *layer in layers) [depths addObject:[NSString stringWithFormat:@"%.2f", layer.depth]];
     NSString *summary = [NSString stringWithFormat:@"scene %zu px: %lu objects (depth %@ over %.2f), background %@ in %.0f ms",
                          side, (unsigned long)layers.count, [depths componentsJoinedByString:@" "], backgroundDepth,
                          inpainted ? @"painted by LaMa" : [@"blur fill: " stringByAppendingString:why ?: @"?"], AUNowMs() - started];
+    if (samLog) summary = [summary stringByAppendingFormat:@"; %@", samLog];
     if (log) *log = summary;
     return scene;
 }

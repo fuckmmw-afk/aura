@@ -13,12 +13,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface AUScene : NSObject
 @property (nonatomic, strong) UIImage *background;            // the cover with its objects painted out
-@property (nonatomic, strong, nullable) UIImage *plateDepth;  // the background's depth: smooth, the objects' room filled from around
+@property (nonatomic, strong, nullable) UIImage *tall;        // the same with the room below it painted on (Fill, lock screen)
+@property (nonatomic) double tallness;                        // tall's height over its width (1 when there is none)
+@property (nonatomic, strong, nullable) UIImage *plateDepth;  // the background's depth (over `tall` when there is one): smooth
 @property (nonatomic, strong, nullable) UIImage *rawDepth;    // the model's depth as it is (256 px): the objects' own relief
 @property (nonatomic) CGRect square;                          // where the cover sits in the canvas, pixels, origin top left
 @property (nonatomic, copy) NSArray<AUSceneLayer *> *layers;  // far to near
 @property (nonatomic) double backgroundDepth;
 @property (nonatomic) BOOL inpainted;                         // painted by the model, not the quick fallback
+@property (nonatomic) BOOL segmented;                         // SAM looked for every object (not only Vision's subjects)
+@property (nonatomic, readonly) BOOL complete;                // both: nothing to make again once the models are here
 // Everything moves by its depth around the background's median c: a point at depth d shifts by tilt x motion x side
 // x factor, factor = (d - c) x 2, so the near goes with the tilt and the far against it. The background bends so per
 // pixel (its depth is smooth, nothing tears; factor kept within -0.6...0.6); every object moves whole at its own
@@ -27,29 +31,18 @@ NS_ASSUME_NONNULL_BEGIN
 - (double)plateFactorOf:(double)depth;
 @property (nonatomic, readonly) double plateCenter, plateLimit;
 @property (nonatomic, readonly) double plateReach;            // the largest |factor| on the background: how far its edge moves
-@property (nonatomic, readonly, nullable) NSData *plateBytes; // plateDepth as 8-bit gray, plateSide x plateSide
-@property (nonatomic, readonly) size_t plateSide;
+@property (nonatomic, readonly, nullable) NSData *plateBytes; // plateDepth as 8-bit gray, plateSide x plateHigh
+@property (nonatomic, readonly) size_t plateSide, plateHigh;
 @property (nonatomic, readonly) double plateLow;              // the background's far end (5th percentile of its depth)
 @property (nonatomic, readonly, nullable) NSData *rawBytes;   // rawDepth as 8-bit gray, rawSide x rawSide
 @property (nonatomic, readonly) size_t rawSide;
-// plateDepth cut to the cover's square, as squareOf: cuts the background.
-- (nullable UIImage *)plateSquare;
 // The canvas's square (the cover's own frame) cut out of the background and each layer, for the cover view.
 - (nullable UIImage *)squareOf:(UIImage *)image;
 - (BOOL)writeTo:(NSString *)folder;
 + (nullable instancetype)readFrom:(NSString *)folder;
 @end
 
-// The largest move, a share of the picture's side, at a full tilt and factor 1 (strength x1).
+// The largest move of the plain (no Metal) look, a share of the picture's side, at a full tilt and factor 1.
 extern const double AUSceneMotion;
-
-// The CPU side of the same motion (lock-screen clips, the Mac harness). Factors for a w x h frame (rows top down)
-// where the canvas is drawn in `canvas` (pixels, origin top left); outside it the factor fades to 0 over `falloff`
-// pixels. malloc'd; free() it.
-float *_Nullable AUScenePlateFactors(AUScene *scene, size_t w, size_t h, CGRect canvas, double falloff);
-// Each frame pixel takes the source at (x + margin - shift.x x f, y + margin - shift.y x f), bilinear; the source is
-// 4-byte pixels, (w + 2 margin) x (h + 2 margin), the frame's position offset by the margin.
-void AUSceneWarp(uint8_t *frame, size_t frameRow, size_t w, size_t h, const uint8_t *source, size_t sourceRow,
-                 size_t margin, const float *factors, CGPoint shift);
 
 NS_ASSUME_NONNULL_END

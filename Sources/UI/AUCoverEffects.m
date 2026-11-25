@@ -79,12 +79,13 @@ static CALayer *plainLayer(void) {
     return layer;
 }
 
-// Where Fill's picture runs into the player's controls: sharp down to 0.46 of the stage, then a light blur coming in
-// by 0.70, a softer one from 0.60 to 0.92, and the whole faded out from 0.66 to its foot — a long, gentle run instead of
-// Taurus's own bands (0.74...0.985).
-static const CGFloat kSoftRamps[2][2] = {{0.46, 0.70}, {0.60, 0.92}};
+// Fill as a full screen: the scene's stage runs past Taurus's field (0.625 of the screen) down to the screen's foot, the
+// cover across the width (a touch bigger, 1.12) with the room LaMa painted below it, sharp down to 0.56 of the screen,
+// a light blur coming in by 0.70, a softer one by 0.84, faded into the player's colour from 0.68 to 0.94.
+static const CGFloat kSoftRamps[2][2] = {{0.56, 0.70}, {0.64, 0.84}};
 static const size_t kSoftSides[2] = {200, 120};
-static const CGFloat kFadeFrom = 0.66;
+static const CGFloat kFadeFrom = 0.68, kFadeTo = 0.94;
+static const CGFloat kFillCrop = 1.12;
 
 static CAGradientLayer *ramp(CGFloat from, CGFloat to, BOOL rising) {
     NSMutableArray *locations = [NSMutableArray array], *colors = [NSMutableArray array];
@@ -106,20 +107,22 @@ static CAGradientLayer *ramp(CGFloat from, CGFloat to, BOOL rising) {
     return layer;
 }
 
-// The scene as it rests (background and objects) blurred by a few percent of its side: a small copy convolved.
-static CGImageRef blurredScene(AUScene *scene, size_t side) {
-    CGImageRef image = scene.background.CGImage;
+// The scene as it rests (background, the room below it when `tall`, and the objects) blurred by a few percent of its
+// side: a small copy convolved.
+static CGImageRef blurredScene(AUScene *scene, size_t side, BOOL tall) {
+    CGImageRef image = tall && scene.tall ? scene.tall.CGImage : scene.background.CGImage;
     if (!image) return NULL;
+    size_t high = (size_t)lround(side * (tall ? scene.tallness : 1));
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    CGContextRef c = CGBitmapContextCreate(NULL, side, side, 8, 0, space, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
+    CGContextRef c = CGBitmapContextCreate(NULL, side, high, 8, 0, space, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
     CGColorSpaceRelease(space);
     if (!c) return NULL;
     CGContextSetInterpolationQuality(c, kCGInterpolationHigh);
-    CGContextDrawImage(c, CGRectMake(0, 0, side, side), image);
-    for (AUSceneLayer *layer in scene.layers) CGContextDrawImage(c, CGRectMake(0, 0, side, side), layer.image.CGImage);
-    vImage_Buffer a = {CGBitmapContextGetData(c), side, side, CGBitmapContextGetBytesPerRow(c)};
-    NSMutableData *scratch = [NSMutableData dataWithLength:a.rowBytes * side];
-    vImage_Buffer b = {scratch.mutableBytes, side, side, a.rowBytes};
+    CGContextDrawImage(c, CGRectMake(0, 0, side, high), image);
+    for (AUSceneLayer *layer in scene.layers) CGContextDrawImage(c, CGRectMake(0, high - side, side, side), layer.image.CGImage);
+    vImage_Buffer a = {CGBitmapContextGetData(c), high, side, CGBitmapContextGetBytesPerRow(c)};
+    NSMutableData *scratch = [NSMutableData dataWithLength:a.rowBytes * high];
+    vImage_Buffer b = {scratch.mutableBytes, high, side, a.rowBytes};
     vImageTentConvolve_ARGB8888(&a, &b, NULL, 0, 0, 5, 5, NULL, kvImageEdgeExtend);
     vImageTentConvolve_ARGB8888(&b, &a, NULL, 0, 0, 5, 5, NULL, kvImageEdgeExtend);
     CGImageRef made = CGBitmapContextCreateImage(c);
@@ -304,7 +307,7 @@ static UIView *taurusField(void) {
         CAGradientLayer *mask = [CAGradientLayer layer];
         mask.actions = noActions();
         mask.colors = @[(id)UIColor.whiteColor.CGColor, (id)UIColor.whiteColor.CGColor, (id)[UIColor colorWithWhite:1 alpha:0].CGColor];
-        mask.locations = @[@0, @(kFadeFrom + 0.12), @1];
+        mask.locations = @[@0, @(kFadeFrom + 0.1), @1];
         surface.objects.mask = mask;
         surface.objectsMask = mask;
         NSMutableArray *softs = [NSMutableArray array], *masks = [NSMutableArray array];
@@ -364,8 +367,15 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
 
 - (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {
     double reach = surface.content ? surface.content.plateReach : 0.3;
-    surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, [self pictureSizeFor:surface], _shownMoving, reach,
-                                        surface.renderer != nil);
+    if (surface.kind == AUSurfaceFill && surface.renderer) {
+        // The cover across the stage's width from its top, the room below it after; zoomed round the cover's middle.
+        CGFloat side0 = bounds.size.width * kFillCrop;
+        CGFloat side = side0 * (_shownMoving ? AUSceneZoom(AUNumber(AUKeyDepthStrength, 1.0)) : 1);
+        surface.pictureRect = CGRectMake((bounds.size.width - side) / 2, (side0 - side) / 2, side, side * surface.renderer.frameTall);
+    } else {
+        surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, [self pictureSizeFor:surface], _shownMoving, reach,
+                                            surface.renderer != nil);
+    }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     surface.background.bounds = (CGRect){CGPointZero, surface.pictureRect.size};
@@ -489,11 +499,14 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     }
     CALayer *taurusMask = ivarLayer(field, "_fillMask");
     if (take) {
-        if (!_fade) _fade = ramp(kFadeFrom, 1, NO);
-        _fade.frame = fill.bounds;
+        if (!_fade) _fade = ramp(kFadeFrom, kFadeTo, NO);
+        _fade.frame = [self fillStageBounds];
         if (fill.mask != _fade) fill.mask = _fade;
-    } else if (fill.mask == _fade && taurusMask) {
-        fill.mask = taurusMask;
+        // The stage runs on below the field Taurus gives its picture.
+        fill.masksToBounds = NO;
+    } else {
+        if (fill.mask == _fade && taurusMask) fill.mask = taurusMask;
+        fill.masksToBounds = YES;
     }
     [CATransaction commit];
 }
@@ -505,17 +518,27 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     _fillSurface.attached = NO;
 }
 
+// Fill's stage: from the field's top to the screen's foot (Taurus's own picture stops at 0.625 of it).
+- (CGRect)fillStageBounds {
+    CALayer *fill = _fillLayer;
+    UIView *field = _field;
+    CGFloat window = field.window.bounds.size.height ?: UIScreen.mainScreen.bounds.size.height;
+    CGFloat high = _fillSurface.renderer ? MAX(fill.bounds.size.height, window) : fill.bounds.size.height;
+    return CGRectMake(0, 0, fill.bounds.size.width, high);
+}
+
 - (void)layoutFill {
     CALayer *fill = _fillLayer;
     if (!fill || !_fillSurface.attached) return;
+    CGRect stage = [self fillStageBounds];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    _fillSurface.stage.frame = fill.bounds;
+    _fillSurface.stage.frame = stage;
     _fillSurface.objects.frame = fill.frame;
     _fillSurface.objectsMask.frame = (CGRect){CGPointZero, fill.bounds.size};
-    if (_fade) _fade.frame = fill.bounds;
+    if (_fade) _fade.frame = stage;
     [CATransaction commit];
-    [self placeSurface:_fillSurface stageBounds:fill.bounds];
+    [self placeSurface:_fillSurface stageBounds:stage];
 }
 
 #pragma mark - moving
@@ -637,12 +660,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     [CATransaction setDisableActions:YES];
     BOOL cover = surface.kind == AUSurfaceCover;
     UIImage *background = cover ? [scene squareOf:scene.background] : scene.background;
-    surface.background.contents = (__bridge id)background.CGImage;
-    for (NSUInteger k = 0; k < surface.softs.count; k++) {
-        CGImageRef soft = blurredScene(scene, kSoftSides[k]);
-        surface.softs[k].contents = (__bridge id)soft;
-        if (soft) CGImageRelease(soft);
-    }
+    surface.background.contents = (__bridge id)(!cover && scene.tall && [AUSceneRenderer supported] ? scene.tall : background).CGImage;
     // The whole scene in 3D on Metal — unless the objects are to step out over the cover's frame (CA layers do that).
     BOOL threeD = [AUSceneRenderer supported] && background.CGImage && !(cover && AUFlag(AUKeyPopOut));
     if (threeD) {
@@ -651,13 +669,18 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
             surface.renderer.presentsWithTransaction = YES;
             [surface.background addSublayer:surface.renderer.layer];
         }
-        [surface.renderer setScene:scene];
+        [surface.renderer setScene:scene tall:!cover];
         surface.renderer.withObjects = objects;
         surface.renderer.layer.frame = surface.background.bounds;
         [surface.renderer layoutForScale:UIScreen.mainScreen.scale];
     } else if (surface.renderer) {
         [surface.renderer.layer removeFromSuperlayer];
         surface.renderer = nil;
+    }
+    for (NSUInteger k = 0; k < surface.softs.count; k++) {
+        CGImageRef soft = blurredScene(scene, kSoftSides[k], !cover && threeD);
+        surface.softs[k].contents = (__bridge id)soft;
+        if (soft) CGImageRelease(soft);
     }
     for (CALayer *layer in surface.layers) [layer removeFromSuperlayer];
     [surface.layers removeAllObjects];
@@ -712,7 +735,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     _shownMoving = moving;
     _wantPlane = YES;
     if (_coverSurface.attached) [self placeSurface:_coverSurface stageBounds:_plane.bounds];
-    if (_fillSurface.attached && _fillLayer) [self placeSurface:_fillSurface stageBounds:_fillLayer.bounds];
+    if (_fillSurface.attached && _fillLayer) [self layoutFill];
     if (first) {
         double latency = (CACurrentMediaTime() - artwork.arrived) * 1000;
         AUStatRecord(@"shown", latency);

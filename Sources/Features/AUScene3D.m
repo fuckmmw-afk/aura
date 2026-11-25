@@ -1,9 +1,9 @@
 #import "AUScene3D.h"
 
-static const double kMaxAngle = 0.20;        // radians at a full tilt, x1
+static const double kMaxAngle = 0.24;        // radians at a full tilt, x1
 static const double kFocal = 1.8;
 static const double kDeep = 0.42;            // the background's far end lies this far behind the window
-static const double kRelief = 0.9;
+static const double kRelief = 0.6;
 static const double kReliefBack = 0.03, kReliefFront = 0.08;
 
 AUCamera AUSceneCamera(AUScene *scene, CGPoint tilt, double strength) {
@@ -74,9 +74,9 @@ static inline double mirror(double u) {
     return MAX(0.0, MIN(1.0, u));
 }
 
-static inline double gray(const uint8_t *p, size_t side, double u, double v) {
-    double x = MAX(0.0, MIN(side - 1.0, u * side - 0.5)), y = MAX(0.0, MIN(side - 1.0, v * side - 0.5));
-    size_t x0 = (size_t)x, y0 = (size_t)y, x1 = MIN(x0 + 1, side - 1), y1 = MIN(y0 + 1, side - 1);
+static inline double gray(const uint8_t *p, size_t side, size_t high, double u, double v) {
+    double x = MAX(0.0, MIN(side - 1.0, u * side - 0.5)), y = MAX(0.0, MIN(high - 1.0, v * high - 0.5));
+    size_t x0 = (size_t)x, y0 = (size_t)y, x1 = MIN(x0 + 1, side - 1), y1 = MIN(y0 + 1, high - 1);
     double fx = x - x0, fy = y - y0;
     double top = p[y0 * side + x0] * (1 - fx) + p[y0 * side + x1] * fx;
     double bottom = p[y1 * side + x0] * (1 - fx) + p[y1 * side + x1] * fx;
@@ -86,7 +86,8 @@ static inline double gray(const uint8_t *p, size_t side, double u, double v) {
 typedef struct {
     AUCamera camera;
     const uint8_t *plate, *raw;
-    size_t plateSide, rawSide;
+    size_t plateSide, plateHigh, rawSide;
+    double tall;            // the plate's height over its width: v runs 0...tall over it
     double still, median;
     BOOL object, mirror;
 } AUZContext;
@@ -95,11 +96,12 @@ static inline double zAt(const AUZContext *c, double qx, double qy) {
     double u = qx + 0.5, v = qy + 0.5;
     if (c->object) {
         if (!c->raw) return AUCameraZ(c->camera, c->median);
-        return AUCameraObjectZ(c->camera, gray(c->raw, c->rawSide, mirror(u), mirror(v)), c->median);
+        return AUCameraObjectZ(c->camera, gray(c->raw, c->rawSide, c->rawSide, mirror(u), mirror(v)), c->median);
     }
-    if (c->mirror) return c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, mirror(u), mirror(v))) : c->still;
-    double inside = c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, MAX(0.0, MIN(1.0, u)), MAX(0.0, MIN(1.0, v)))) : c->still;
-    double out = MAX(0.0, MAX(fabs(qx), fabs(qy)) - 0.5);
+    if (c->mirror) return c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, c->plateHigh, mirror(u), mirror(v) / c->tall)) : c->still;
+    double inside = c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, c->plateHigh, MAX(0.0, MIN(1.0, u)),
+                                                       MAX(0.0, MIN(1.0, v / c->tall)))) : c->still;
+    double out = MAX(0.0, MAX(MAX(-u, u - 1), MAX(-v, v - c->tall)));
     double t = MIN(1.0, out / 0.05);
     t = t * t * (3 - 2 * t);
     return inside * (1 - t) + c->camera.zOut * t;
@@ -120,7 +122,8 @@ void AUSceneDraw3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect s
     if (!frame || !source.pixels || square.size.width < 1) return;
     AUTurn turn = turnOf(camera);
     NSData *plate = scene.plateBytes, *raw = scene.rawBytes;
-    AUZContext context = {camera, plate.bytes, raw.bytes, scene.plateSide, scene.rawSide,
+    AUZContext context = {camera, plate.bytes, raw.bytes, scene.plateSide, scene.plateHigh, scene.rawSide,
+                          scene.plateHigh && scene.plateSide ? scene.plateHigh / (double)scene.plateSide : 1,
                           AUCameraZ(camera, scene.backgroundDepth), source.median, source.object, source.mirror};
     const AUZContext *zc = &context;
     double midX = CGRectGetMidX(square), midY = CGRectGetMidY(square), sw = square.size.width, sh = square.size.height;

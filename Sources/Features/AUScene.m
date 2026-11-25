@@ -1,7 +1,7 @@
 #import "AUScene.h"
 #import "AUImage.h"
 
-static NSString *const kVersion = @"scene-v3";
+static NSString *const kVersion = @"scene-v4";
 
 @implementation AUSceneLayer
 @end
@@ -12,17 +12,18 @@ static const double kPlateLimit = 0.6, kObjectLeast = 0.3;
 @implementation AUScene {
     NSMapTable<UIImage *, UIImage *> *_squares;
     NSData *_plateBytes;
-    size_t _plateSide;
+    size_t _plateSide, _plateHigh;
     double _plateReach;
     BOOL _plateRead;
     double _plateLow;
     NSData *_rawBytes;
     size_t _rawSide;
     BOOL _rawRead;
-    UIImage *_plateSquare;
 }
 
 - (double)plateCenter { return _backgroundDepth; }
+- (BOOL)complete { return _inpainted && _segmented; }
+- (double)tallness { return _tall && _tallness >= 1 ? _tallness : 1; }
 - (double)plateLimit { return kPlateLimit; }
 
 - (double)plateFactorOf:(double)depth {
@@ -37,7 +38,6 @@ static const double kPlateLimit = 0.6, kObjectLeast = 0.3;
     _plateDepth = plateDepth;
     _plateRead = NO;
     _plateBytes = nil;
-    _plateSquare = nil;
 }
 
 static NSData *grayBytes(CGImageRef image, size_t *outSide) {
@@ -80,53 +80,43 @@ static NSData *grayBytes(CGImageRef image, size_t *outSide) {
     _plateLow = MAX(0.0, _backgroundDepth - 0.2);
     CGImageRef image = _plateDepth.CGImage;
     if (!image) return;
-    size_t side = MAX(CGImageGetWidth(image), CGImageGetHeight(image));
-    if (side < 2 || side > 1024) return;
-    NSMutableData *bytes = [NSMutableData dataWithLength:side * side];
+    size_t side = CGImageGetWidth(image), high = CGImageGetHeight(image);
+    if (side < 2 || high < 2 || side > 1024 || high > 2048) return;
+    NSMutableData *bytes = [NSMutableData dataWithLength:side * high];
     CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
-    CGContextRef c = CGBitmapContextCreate(bytes.mutableBytes, side, side, 8, side, gray, (CGBitmapInfo)kCGImageAlphaNone);
+    CGContextRef c = CGBitmapContextCreate(bytes.mutableBytes, side, high, 8, side, gray, (CGBitmapInfo)kCGImageAlphaNone);
     CGColorSpaceRelease(gray);
     if (!c) return;
     CGContextSetInterpolationQuality(c, kCGInterpolationHigh);
-    CGContextDrawImage(c, CGRectMake(0, 0, side, side), image);
+    CGContextDrawImage(c, CGRectMake(0, 0, side, high), image);
     CGContextRelease(c);
     const uint8_t *p = bytes.bytes;
     double reach = 0;
     size_t histogram[256] = {0};
-    for (size_t i = 0; i < side * side; i++) {
+    // The far end over the cover's own square (the room below is the floor carried on).
+    size_t square = MIN(high, side);
+    for (size_t i = 0; i < side * square; i++) {
         reach = MAX(reach, fabs([self plateFactorOf:p[i] / 255.0]));
         histogram[p[i]]++;
     }
     size_t seen = 0;
     for (int v = 0; v < 256; v++) {
         seen += histogram[v];
-        if (seen >= side * side / 20) {
+        if (seen >= side * square / 20) {
             _plateLow = v / 255.0;
             break;
         }
     }
     _plateBytes = bytes;
     _plateSide = side;
+    _plateHigh = high;
     _plateReach = reach;
 }
 
 - (NSData *)plateBytes { [self readPlate]; return _plateBytes; }
 - (size_t)plateSide { [self readPlate]; return _plateSide; }
+- (size_t)plateHigh { [self readPlate]; return _plateHigh; }
 - (double)plateReach { [self readPlate]; return _plateReach; }
-
-- (UIImage *)plateSquare {
-    if (_plateSquare || !_plateDepth.CGImage) return _plateSquare;
-    CGSize canvas = _background.size;
-    if (canvas.width < 1 || canvas.height < 1) return nil;
-    CGImageRef plate = _plateDepth.CGImage;
-    double sx = CGImageGetWidth(plate) / canvas.width, sy = CGImageGetHeight(plate) / canvas.height;
-    CGRect cut = CGRectIntegral(CGRectMake(_square.origin.x * sx, _square.origin.y * sy, _square.size.width * sx, _square.size.height * sy));
-    CGImageRef square = CGImageCreateWithImageInRect(plate, cut);
-    if (!square) return _plateDepth;
-    _plateSquare = [UIImage imageWithCGImage:square];
-    CGImageRelease(square);
-    return _plateSquare;
-}
 
 - (UIImage *)squareOf:(UIImage *)image {
     if (!image.CGImage) return nil;
@@ -141,62 +131,6 @@ static NSData *grayBytes(CGImageRef image, size_t *outSide) {
     return square;
 }
 
-static inline double bilinear8(const uint8_t *p, size_t side, double x, double y) {
-    x = MAX(0.0, MIN(side - 1.0, x));
-    y = MAX(0.0, MIN(side - 1.0, y));
-    size_t x0 = (size_t)x, y0 = (size_t)y, x1 = MIN(x0 + 1, side - 1), y1 = MIN(y0 + 1, side - 1);
-    double fx = x - x0, fy = y - y0;
-    double top = p[y0 * side + x0] * (1 - fx) + p[y0 * side + x1] * fx;
-    double bottom = p[y1 * side + x0] * (1 - fx) + p[y1 * side + x1] * fx;
-    return (top * (1 - fy) + bottom * fy) / 255.0;
-}
-
-float *_Nullable AUScenePlateFactors(AUScene *scene, size_t w, size_t h, CGRect canvas, double falloff) {
-    float *factors = malloc(w * h * sizeof(float));
-    if (!factors) return NULL;
-    NSData *plate = scene.plateBytes;
-    const uint8_t *p = plate.bytes;
-    size_t side = scene.plateSide;
-    double still = [scene plateFactorOf:scene.plateCenter - 0.15];
-    double minX = CGRectGetMinX(canvas), maxX = CGRectGetMaxX(canvas), minY = CGRectGetMinY(canvas), maxY = CGRectGetMaxY(canvas);
-    dispatch_apply(h, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t y) {
-        double py = y + 0.5;
-        double v = (py - minY) / canvas.size.height;
-        double dy = MAX(0.0, MAX(minY - py, py - maxY));
-        for (size_t x = 0; x < w; x++) {
-            double px = x + 0.5;
-            double u = (px - minX) / canvas.size.width;
-            double f = p ? [scene plateFactorOf:bilinear8(p, side, u * side - 0.5, v * side - 0.5)] : still;
-            double dx = MAX(0.0, MAX(minX - px, px - maxX));
-            double t = falloff > 0 ? MAX(0.0, 1 - hypot(dx, dy) / falloff) : (dx > 0 || dy > 0 ? 0 : 1);
-            factors[y * w + x] = (float)(f * t * t * (3 - 2 * t));
-        }
-    });
-    return factors;
-}
-
-void AUSceneWarp(uint8_t *frame, size_t frameRow, size_t w, size_t h, const uint8_t *source, size_t sourceRow,
-                 size_t margin, const float *factors, CGPoint shift) {
-    const size_t sw = w + 2 * margin, sh = h + 2 * margin;
-    const float sx = (float)shift.x, sy = (float)shift.y;
-    dispatch_apply(h, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t y) {
-        uint8_t *out = frame + y * frameRow;
-        const float *f = factors + y * w;
-        for (size_t x = 0; x < w; x++) {
-            float fx = (float)(x + margin) - sx * f[x], fy = (float)(y + margin) - sy * f[x];
-            fx = fminf(fmaxf(fx, 0), (float)(sw - 1.001));
-            fy = fminf(fmaxf(fy, 0), (float)(sh - 1.001));
-            size_t x0 = (size_t)fx, y0 = (size_t)fy;
-            uint32_t ax = (uint32_t)((fx - x0) * 256), ay = (uint32_t)((fy - y0) * 256);
-            const uint8_t *a = source + y0 * sourceRow + x0 * 4, *b = a + sourceRow;
-            for (int c = 0; c < 4; c++) {
-                uint32_t top = a[c] * (256 - ax) + a[c + 4] * ax, bottom = b[c] * (256 - ax) + b[c + 4] * ax;
-                out[x * 4 + c] = (uint8_t)((top * (256 - ay) + bottom * ay + 32768) >> 16);
-            }
-        }
-    });
-}
-
 - (BOOL)writeTo:(NSString *)folder {
     NSFileManager *files = NSFileManager.defaultManager;
     [files createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil];
@@ -208,9 +142,10 @@ void AUSceneWarp(uint8_t *frame, size_t frameRow, size_t w, size_t h, const uint
         [depths addObject:@(_layers[i].depth)];
     }
     if (_plateDepth.CGImage && ![AUPNGData(_plateDepth.CGImage) writeToFile:[folder stringByAppendingPathComponent:@"scene-depth.png"] atomically:YES]) return NO;
+    if (_tall.CGImage && ![AUJPEGData(_tall.CGImage, 0.9) writeToFile:[folder stringByAppendingPathComponent:@"scene-tall.jpg"] atomically:YES]) return NO;
     if (_rawDepth.CGImage && ![AUPNGData(_rawDepth.CGImage) writeToFile:[folder stringByAppendingPathComponent:@"scene-raw.png"] atomically:YES]) return NO;
     NSDictionary *plist = @{@"version": kVersion, @"square": @[@(_square.origin.x), @(_square.origin.y), @(_square.size.width), @(_square.size.height)],
-                            @"depths": depths, @"backgroundDepth": @(_backgroundDepth), @"inpainted": @(_inpainted)};
+                            @"depths": depths, @"backgroundDepth": @(_backgroundDepth), @"inpainted": @(_inpainted), @"segmented": @(_segmented), @"tallness": @(_tallness)};
     return [plist writeToFile:[folder stringByAppendingPathComponent:@"scene.plist"] atomically:YES];
 }
 
@@ -238,6 +173,13 @@ void AUSceneWarp(uint8_t *frame, size_t frameRow, size_t w, size_t h, const uint
     scene.square = CGRectMake([square[0] doubleValue], [square[1] doubleValue], [square[2] doubleValue], [square[3] doubleValue]);
     scene.backgroundDepth = [plist[@"backgroundDepth"] doubleValue];
     scene.inpainted = [plist[@"inpainted"] boolValue];
+    scene.segmented = [plist[@"segmented"] boolValue];
+    CGImageRef tall = AUImageFromData([NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"scene-tall.jpg"]]);
+    if (tall) {
+        scene.tall = [UIImage imageWithCGImage:tall];
+        scene.tallness = [plist[@"tallness"] doubleValue] ?: CGImageGetHeight(tall) / (double)CGImageGetWidth(tall);
+        CGImageRelease(tall);
+    }
     NSMutableArray *layers = [NSMutableArray array];
     for (NSUInteger i = 0; i < depths.count; i++) {
         CGImageRef image = AUImageFromData([NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:[NSString stringWithFormat:@"scene-layer-%lu.png", (unsigned long)i]]]);

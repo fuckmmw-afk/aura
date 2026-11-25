@@ -1,4 +1,5 @@
 #import "AUSceneRenderer.h"
+#import <UIKit/UIKit.h>
 #import "Core/AUCore.h"
 #import "Features/AUImage.h"
 #import "Features/AUScene3D.h"
@@ -8,14 +9,16 @@
 static NSString *const kShader = @"\
 #include <metal_stdlib>\n\
 using namespace metal;\n\
-struct Cam { float2 angles; float2 range; float pivot; float scale; float focal; float relief; float median; float kind;\n\
-             float zFar; float zNear; float zoom; float reliefBack; float reliefFront; float pad; };\n\
+struct Cam { float2 angles; float2 range; float2 rangeY; float pivot; float scale; float focal; float relief; float median;\n\
+             float kind; float zFar; float zNear; float zoom; float reliefBack; float reliefFront; float texTall; float plateTall;\n\
+             float frameTall; };\n\
 struct VOut { float4 position [[position]]; float2 uv; };\n\
 vertex VOut au_mesh(uint vid [[vertex_id]], const device float2 *grid [[buffer(1)]], constant Cam &c [[buffer(0)]],\n\
                     texture2d<float> depth [[texture(0)]]) {\n\
     constexpr sampler sd(address::mirrored_repeat, filter::linear);\n\
-    float2 uv = mix(float2(c.range.x), float2(c.range.y), grid[vid]);\n\
-    float d = depth.sample(sd, uv, level(0)).r;\n\
+    float2 g = grid[vid];\n\
+    float2 uv = float2(mix(c.range.x, c.range.y, g.x), mix(c.rangeY.x, c.rangeY.y, g.y));\n\
+    float d = depth.sample(sd, c.kind < 0.5 ? float2(uv.x, uv.y / c.plateTall) : uv, level(0)).r;\n\
     float z = c.kind < 0.5 ? (d - c.pivot) * c.scale\n\
         : (c.median + clamp(d - c.median, -c.reliefBack, c.reliefFront) * c.relief - c.pivot) * c.scale;\n\
     z = clamp(z, -c.zFar, c.zNear);\n\
@@ -27,8 +30,8 @@ vertex VOut au_mesh(uint vid [[vertex_id]], const device float2 *grid [[buffer(1
     float y2 = y * cb + z1 * sb, z2 = -y * sb + z1 * cb;\n\
     float w = c.focal / (c.focal - z2);\n\
     VOut o;\n\
-    o.position = float4(x1 * w * 2 * c.zoom, -y2 * w * 2 * c.zoom, 0.5, 1);\n\
-    o.uv = uv;\n\
+    o.position = float4(x1 * w * 2 * c.zoom, 1 - 2 * (y2 * w * c.zoom + 0.5) / c.frameTall, 0.5, 1);\n\
+    o.uv = c.kind < 0.5 ? float2(uv.x, uv.y / c.texTall) : uv;\n\
     return o;\n\
 }\n\
 fragment half4 au_back(VOut in [[stage_in]], texture2d<half> color [[texture(0)]]) {\n\
@@ -41,8 +44,8 @@ fragment half4 au_object(VOut in [[stage_in]], texture2d<half> color [[texture(0
 }\n";
 
 typedef struct {
-    float angles[2], range[2];
-    float pivot, scale, focal, relief, median, kind, zFar, zNear, zoom, reliefBack, reliefFront, pad;
+    float angles[2], range[2], rangeY[2];
+    float pivot, scale, focal, relief, median, kind, zFar, zNear, zoom, reliefBack, reliefFront, texTall, plateTall, frameTall;
 } AUCam;
 
 enum { kGrid = 96 };
@@ -55,6 +58,7 @@ enum { kGrid = 96 };
     NSArray<id<MTLTexture>> *_objects;
     NSArray<NSNumber *> *_medians;
     AUScene *_scene;
+    double _texTall;
 }
 
 + (id<MTLDevice>)device {
@@ -121,6 +125,7 @@ enum { kGrid = 96 };
     _strength = 1;
     _zoom = 1;
     _withObjects = YES;
+    _texTall = 1;
     // The mesh: kGrid x kGrid points over 0...1, two triangles a cell.
     NSMutableData *grid = [NSMutableData dataWithLength:kGrid * kGrid * sizeof(float) * 2];
     float *g = grid.mutableBytes;
@@ -181,11 +186,13 @@ static id<MTLTexture> grayTexture(NSData *bytes, size_t side) {
     return texture;
 }
 
-- (void)setScene:(AUScene *)scene {
+- (void)setScene:(AUScene *)scene tall:(BOOL)tall {
     // Until it is drawn again, the last cover must not show over the new one.
     _layer.hidden = YES;
     _scene = scene;
-    _background = colorTexture(scene.background.CGImage, NO);
+    UIImage *picture = tall && scene.tall ? scene.tall : scene.background;
+    _texTall = tall && scene.tall ? scene.tallness : 1;
+    _background = colorTexture(picture.CGImage, NO);
     uint8_t flat = (uint8_t)lround(MAX(0.0, MIN(1.0, scene.backgroundDepth)) * 255);
     NSData *flatBytes = [NSData dataWithBytes:(uint8_t[4]){flat, flat, flat, flat} length:4];
     _plate = grayTexture(scene.plateBytes, scene.plateSide) ?: grayTexture(flatBytes, 2);
@@ -218,9 +225,10 @@ static id<MTLTexture> grayTexture(NSData *bytes, size_t side) {
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     AUCamera camera = AUSceneCamera(_scene, _tilt, _strength);
-    AUCam cam = {{(float)camera.angleX, (float)camera.angleY}, {-0.12f, 1.12f}, (float)camera.pivot, (float)camera.scale,
-                 (float)camera.focal, (float)camera.relief, 0, 0, (float)camera.zFar, (float)camera.zNear, zoom,
-                 (float)camera.reliefBack, (float)camera.reliefFront, 0};
+    float texTall = (float)_texTall, plateTall = (float)MAX(1.0, _scene.plateHigh / (double)MAX((size_t)1, _scene.plateSide));
+    AUCam cam = {{(float)camera.angleX, (float)camera.angleY}, {-0.12f, 1.12f}, {-0.12f, texTall + 0.12f}, (float)camera.pivot,
+                 (float)camera.scale, (float)camera.focal, (float)camera.relief, 0, 0, (float)camera.zFar, (float)camera.zNear, zoom,
+                 (float)camera.reliefBack, (float)camera.reliefFront, texTall, plateTall, texTall};
     id<MTLRenderCommandEncoder> encoder = [buffer renderCommandEncoderWithDescriptor:pass];
     [encoder setVertexBuffer:_grid offset:0 atIndex:1];
     [encoder setRenderPipelineState:pipelines[0]];
@@ -231,8 +239,8 @@ static id<MTLTexture> grayTexture(NSData *bytes, size_t side) {
     if (_withObjects && _objects.count) {
         [encoder setRenderPipelineState:pipelines[1]];
         [encoder setVertexTexture:_raw atIndex:0];
-        cam.range[0] = 0;
-        cam.range[1] = 1;
+        cam.range[0] = cam.rangeY[0] = 0;
+        cam.range[1] = cam.rangeY[1] = 1;
         cam.kind = 1;
         for (NSUInteger i = 0; i < _objects.count; i++) {
             cam.median = _medians[i].floatValue;
@@ -242,6 +250,10 @@ static id<MTLTexture> grayTexture(NSData *bytes, size_t side) {
         }
     }
     [encoder endEncoding];
+}
+
+- (double)frameTall {
+    return _texTall;
 }
 
 - (BOOL)ready {

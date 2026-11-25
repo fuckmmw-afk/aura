@@ -15,7 +15,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) CGFloat strength;                // the slider's multiple
 @property (nonatomic) CGFloat zoom;                    // only for renderImage: the layer itself is the zoomed picture
 @property (nonatomic) BOOL withObjects;
-- (void)setScene:(nullable AUScene *)scene;
+// tall: the picture with the room painted below it (Fill, when the scene has one); the layer is then that tall.
+- (void)setScene:(nullable AUScene *)scene tall:(BOOL)tall;
+@property (nonatomic, readonly) double frameTall;   // the layer's height over its width
 - (void)layoutForScale:(CGFloat)scale;
 - (void)render;
 - (nullable CGImageRef)renderImageWidth:(size_t)width height:(size_t)height CF_RETURNS_RETAINED;
