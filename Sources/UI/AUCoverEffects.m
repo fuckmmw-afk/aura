@@ -3,6 +3,7 @@
 #import "Core/AUTaurus.h"
 #import "Features/AUPipeline.h"
 #import "UI/AUParallaxRenderer.h"
+#import <Accelerate/Accelerate.h>
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
@@ -23,6 +24,8 @@ typedef NS_ENUM(NSInteger, AUSurfaceKind) {
 @property (nonatomic, strong) CALayer *stage;                 // clipped to the cover or the fill
 @property (nonatomic, strong) CALayer *background;
 @property (nonatomic, strong, nullable) AUParallaxRenderer *renderer;   // the background bent by its depth, over `background`
+@property (nonatomic, strong, nullable) CALayer *soft;                   // Fill: a lightly blurred copy, faded in toward the foot
+@property (nonatomic, strong, nullable) CAGradientLayer *softMask;
 @property (nonatomic, strong) CALayer *objects;               // the objects' host: unclipped over the cover, clipped and faded in Fill
 @property (nonatomic, strong) CAGradientLayer *objectsMask;
 @property (nonatomic, strong) NSMutableArray<CALayer *> *layers;
@@ -75,6 +78,50 @@ static CALayer *plainLayer(void) {
     return layer;
 }
 
+// Where Fill's picture runs into the player's controls: sharp to 0.58 of the stage, a light blur over it by 0.86, and
+// the whole faded out from 0.64 to its foot — longer and gentler than Taurus's own bands (0.74...0.985).
+static const CGFloat kSoftFrom = 0.58, kSoftTo = 0.86, kFadeFrom = 0.64;
+
+static CAGradientLayer *ramp(CGFloat from, CGFloat to, BOOL rising) {
+    NSMutableArray *locations = [NSMutableArray array], *colors = [NSMutableArray array];
+    [locations addObject:@0];
+    [colors addObject:(id)[UIColor colorWithWhite:1 alpha:rising ? 0 : 1].CGColor];
+    for (int i = 0; i <= 16; i++) {
+        CGFloat t = i / 16.0, smooth = t * t * t * (t * (t * 6 - 15) + 10);
+        [locations addObject:@(from + (to - from) * t)];
+        [colors addObject:(id)[UIColor colorWithWhite:1 alpha:rising ? smooth : 1 - smooth].CGColor];
+    }
+    [locations addObject:@1];
+    [colors addObject:(id)[UIColor colorWithWhite:1 alpha:rising ? 1 : 0].CGColor];
+    CAGradientLayer *layer = [CAGradientLayer layer];
+    layer.actions = noActions();
+    layer.colors = colors;
+    layer.locations = locations;
+    layer.startPoint = CGPointMake(0.5, 0);
+    layer.endPoint = CGPointMake(0.5, 1);
+    return layer;
+}
+
+// The picture blurred by a few percent of its side (a small copy convolved): Fill's soft foot.
+static CGImageRef lightlyBlurred(CGImageRef image) {
+    if (!image) return NULL;
+    size_t side = 160;
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef c = CGBitmapContextCreate(NULL, side, side, 8, 0, space, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    if (!c) return NULL;
+    CGContextSetInterpolationQuality(c, kCGInterpolationHigh);
+    CGContextDrawImage(c, CGRectMake(0, 0, side, side), image);
+    vImage_Buffer a = {CGBitmapContextGetData(c), side, side, CGBitmapContextGetBytesPerRow(c)};
+    NSMutableData *scratch = [NSMutableData dataWithLength:a.rowBytes * side];
+    vImage_Buffer b = {scratch.mutableBytes, side, side, a.rowBytes};
+    vImageTentConvolve_ARGB8888(&a, &b, NULL, 0, 0, 5, 5, NULL, kvImageEdgeExtend);
+    vImageTentConvolve_ARGB8888(&b, &a, NULL, 0, 0, 5, 5, NULL, kvImageEdgeExtend);
+    CGImageRef made = CGBitmapContextCreateImage(c);
+    CGContextRelease(c);
+    return made;
+}
+
 static CALayer *ivarLayer(id object, const char *name) {
     Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
     id value = ivar ? object_getIvar(object, ivar) : nil;
@@ -94,6 +141,7 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
     UIView *_plane;                  // over the cover, inside it, clipped to its corners
     UIView *_subjectHost;            // a zero-size view in the tilt view, so nothing takes it for the cover
     AUSurface *_coverSurface, *_fillSurface;
+    CAGradientLayer *_fade;
     __weak AUArtwork *_shown;
     NSString *_shownKey;
     BOOL _shownMoving, _wantPlane;
@@ -251,9 +299,13 @@ static UIView *taurusField(void) {
         CAGradientLayer *mask = [CAGradientLayer layer];
         mask.actions = noActions();
         mask.colors = @[(id)UIColor.whiteColor.CGColor, (id)UIColor.whiteColor.CGColor, (id)[UIColor colorWithWhite:1 alpha:0].CGColor];
-        mask.locations = @[@0, @0.86, @1];
+        mask.locations = @[@0, @(kFadeFrom + 0.12), @1];
         surface.objects.mask = mask;
         surface.objectsMask = mask;
+        surface.soft = plainLayer();
+        surface.softMask = ramp(0, 1, YES);
+        surface.soft.mask = surface.softMask;
+        [surface.stage addSublayer:surface.soft];
     }
     return surface;
 }
@@ -305,6 +357,21 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     [CATransaction setDisableActions:YES];
     surface.background.bounds = (CGRect){CGPointZero, surface.pictureRect.size};
     surface.background.position = CGPointMake(CGRectGetMidX(surface.pictureRect), CGRectGetMidY(surface.pictureRect));
+    if (surface.soft) {
+        surface.soft.bounds = surface.background.bounds;
+        surface.soft.position = surface.background.position;
+        surface.softMask.frame = surface.soft.bounds;
+        // The ramp is the stage's: its share of the stage's height turned into the picture's.
+        CGFloat h = MAX(1, surface.pictureRect.size.height), y = surface.pictureRect.origin.y, H = bounds.size.height;
+        CGFloat from = (kSoftFrom * H - y) / h, to = (kSoftTo * H - y) / h;
+        NSMutableArray *locations = [NSMutableArray array];
+        NSArray *base = ramp(0, 1, YES).locations;
+        for (NSUInteger i = 0; i < base.count; i++) {
+            CGFloat t = i == 0 ? 0 : i == base.count - 1 ? 1 : from + (to - from) * [base[i] doubleValue];
+            [locations addObject:@(MAX(0, MIN(1, t)))];
+        }
+        surface.softMask.locations = locations;
+    }
     if (surface.renderer) {
         surface.renderer.layer.frame = surface.background.bounds;
         [surface.renderer layoutForScale:UIScreen.mainScreen.scale];
@@ -393,7 +460,32 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     [self apply:[AUPipeline shared].current animated:NO];
 }
 
+// While Aura's scene shows in Fill, Taurus's four blur bands (a still picture, they would not move with it) are
+// hidden and its fade is a longer, gentler one; both go back as they were when the scene goes.
+- (void)takeTaurusFill:(BOOL)take {
+    UIView *field = _field;
+    CALayer *fill = _fillLayer;
+    if (!field || !fill) return;
+    Ivar blursIvar = class_getInstanceVariable(object_getClass(field), "_fillBlurLayers");
+    id blurs = blursIvar ? object_getIvar(field, blursIvar) : nil;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if ([blurs isKindOfClass:NSArray.class]) {
+        for (id blur in blurs) if ([blur isKindOfClass:CALayer.class]) ((CALayer *)blur).hidden = take;
+    }
+    CALayer *taurusMask = ivarLayer(field, "_fillMask");
+    if (take) {
+        if (!_fade) _fade = ramp(kFadeFrom, 1, NO);
+        _fade.frame = fill.bounds;
+        if (fill.mask != _fade) fill.mask = _fade;
+    } else if (fill.mask == _fade && taurusMask) {
+        fill.mask = taurusMask;
+    }
+    [CATransaction commit];
+}
+
 - (void)detachFill {
+    [self takeTaurusFill:NO];
     [_fillSurface.stage removeFromSuperlayer];
     [_fillSurface.objects removeFromSuperlayer];
     _fillSurface.attached = NO;
@@ -407,6 +499,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     _fillSurface.stage.frame = fill.bounds;
     _fillSurface.objects.frame = fill.frame;
     _fillSurface.objectsMask.frame = (CGRect){CGPointZero, fill.bounds.size};
+    if (_fade) _fade.frame = fill.bounds;
     [CATransaction commit];
     [self placeSurface:_fillSurface stageBounds:fill.bounds];
 }
@@ -432,6 +525,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
             CGFloat back = scene ? [scene plateFactorOf:scene.plateCenter - 0.15] * strength * side : 0;
             surface.background.affineTransform = CGAffineTransformMakeTranslation(_tiltNow.x * back, _tiltNow.y * back);
         }
+        surface.soft.affineTransform = surface.background.affineTransform;
         CGRect objectsRect = picture;
         CGAffineTransform base = CGAffineTransformIdentity;
         if (surface.kind == AUSurfaceCover && _cover && surface.objects.superlayer == _plane.layer) {
@@ -519,6 +613,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
             [_fillSurface.objects addAnimation:[fade copy] forKey:@"aura.fade"];
         }
         stage.opacity = target;
+        [self takeTaurusFill:shown];
     }
     [self moveSurfaces];
 }
@@ -529,6 +624,11 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     BOOL cover = surface.kind == AUSurfaceCover;
     UIImage *background = cover ? [scene squareOf:scene.background] : scene.background;
     surface.background.contents = (__bridge id)background.CGImage;
+    if (surface.soft) {
+        CGImageRef soft = lightlyBlurred(background.CGImage);
+        surface.soft.contents = (__bridge id)soft;
+        if (soft) CGImageRelease(soft);
+    }
     if ([AUParallaxRenderer supported] && background.CGImage) {
         if (!surface.renderer) {
             surface.renderer = [AUParallaxRenderer new];

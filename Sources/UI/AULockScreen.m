@@ -38,8 +38,11 @@ typedef struct {
     BOOL moving;
 } AUClipLayers;
 
+// The lock screen's flight: a wide orbit and half again the app's move — nobody tilts a locked phone to see it.
+static const double kLockBoost = 1.5;
+
 static CGPoint tiltAt(double phase) {
-    return CGPointMake(0.65 * sin(2 * M_PI * phase), 0.4 * cos(2 * M_PI * phase));
+    return CGPointMake(1.0 * sin(2 * M_PI * phase), 0.7 * cos(2 * M_PI * phase));
 }
 
 static CGContextRef bgraContext(size_t width, size_t height, void *data, size_t rowBytes) {
@@ -59,46 +62,66 @@ static CGImageRef scaled(CGImageRef image, CGSize size) {
     return made;
 }
 
-// The cover blurred and filled over the whole frame, made on the CPU (vImage over a small copy): the lock screen's
-// room above and below the square cover, as Apple stretches a cover there.
-static CGImageRef blurredFill(CGImageRef cover, CGSize size) {
-    size_t sw = 96, sh = (size_t)round(96 * size.height / size.width);
+// A copy of `image` blurred by about `radius` pixels (a small copy convolved, drawn back up), the same size.
+static CGImageRef softened(CGImageRef image, double radius) {
+    size_t w = CGImageGetWidth(image), h = CGImageGetHeight(image);
+    double shrink = MAX(1.0, radius / 3);
+    size_t sw = MAX((size_t)4, (size_t)round(w / shrink)), sh = MAX((size_t)4, (size_t)round(h / shrink));
     CGContextRef small = bgraContext(sw, sh, NULL, 0);
-    double scale = MAX(sw / (double)CGImageGetWidth(cover), sh / (double)CGImageGetHeight(cover));
-    double w = CGImageGetWidth(cover) * scale, h = CGImageGetHeight(cover) * scale;
     CGContextSetInterpolationQuality(small, kCGInterpolationHigh);
-    CGContextDrawImage(small, CGRectMake((sw - w) / 2, (sh - h) / 2, w, h), cover);
+    CGContextDrawImage(small, CGRectMake(0, 0, sw, sh), image);
     vImage_Buffer a = {CGBitmapContextGetData(small), sh, sw, CGBitmapContextGetBytesPerRow(small)};
     NSMutableData *scratch = [NSMutableData dataWithLength:a.rowBytes * sh];
     vImage_Buffer b = {scratch.mutableBytes, sh, sw, a.rowBytes};
-    for (int pass = 0; pass < 3; pass++) {
-        vImageBoxConvolve_ARGB8888(&a, &b, NULL, 0, 0, 9, 9, NULL, kvImageEdgeExtend);
-        vImageBoxConvolve_ARGB8888(&b, &a, NULL, 0, 0, 9, 9, NULL, kvImageEdgeExtend);
-    }
+    vImageTentConvolve_ARGB8888(&a, &b, NULL, 0, 0, 7, 7, NULL, kvImageEdgeExtend);
+    vImageTentConvolve_ARGB8888(&b, &a, NULL, 0, 0, 7, 7, NULL, kvImageEdgeExtend);
     CGImageRef tiny = CGBitmapContextCreateImage(small);
     CGContextRelease(small);
-    CGImageRef made = scaled(tiny, size);
+    CGImageRef made = scaled(tiny, CGSizeMake(w, h));
     CGImageRelease(tiny);
     return made;
 }
 
-// A mask the square's size, opaque but for a soft fade along its top and bottom edges, so it melts into the fill.
-static CGImageRef edgeFade(size_t side) {
-    NSMutableData *bytes = [NSMutableData dataWithLength:side * side];
-    uint8_t *p = bytes.mutableBytes;
-    double band = side * 0.10;
-    for (size_t y = 0; y < side; y++) {
-        double t = MIN(1.0, MIN(y, side - 1 - y) / band);
-        memset(p + y * side, (int)lround(255 * t * t * (3 - 2 * t)), side);
-    }
-    CFDataRef data = CFDataCreate(NULL, p, (CFIndex)(side * side));
-    CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
-    CFRelease(data);
-    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
-    CGImageRef mask = CGImageCreate(side, side, 8, 8, side, gray, (CGBitmapInfo)kCGImageAlphaNone, provider, NULL, NO, kCGRenderingIntentDefault);
-    CGColorSpaceRelease(gray);
-    CGDataProviderRelease(provider);
-    return mask;
+// The room above and below the square, as Apple fills it: the cover's own top and bottom rows carried out to the
+// frame's edges, then a blur that grows with the distance from the cover — none at all inside it, a touch at its
+// edge, soft farther out — so the cover runs on into its colours with no seam and no dark band.
+static void extendCover(CGContextRef base, CGRect square, double side) {
+    uint8_t *p = CGBitmapContextGetData(base);
+    size_t row = CGBitmapContextGetBytesPerRow(base), w = CGBitmapContextGetWidth(base), h = CGBitmapContextGetHeight(base);
+    long top = MAX(0L, MIN((long)h - 1, lround(CGRectGetMinY(square))));
+    long bottom = MAX(top + 1, MIN((long)h, lround(CGRectGetMaxY(square))));
+    long fromTop = MIN(top + 2, (long)h - 1), fromBottom = MAX(bottom - 3, 0L);
+    for (long y = 0; y < top; y++) memcpy(p + y * row, p + fromTop * row, row);
+    for (long y = bottom; y < (long)h; y++) memcpy(p + y * row, p + fromBottom * row, row);
+    CGImageRef full = CGBitmapContextCreateImage(base);
+    CGImageRef lightImage = softened(full, side * 0.012), softImage = softened(full, side * 0.045);
+    CGImageRelease(full);
+    CGContextRef light = bgraContext(w, h, NULL, 0), soft = bgraContext(w, h, NULL, 0);
+    CGContextDrawImage(light, CGRectMake(0, 0, w, h), lightImage);
+    CGContextDrawImage(soft, CGRectMake(0, 0, w, h), softImage);
+    CGImageRelease(lightImage);
+    CGImageRelease(softImage);
+    const uint8_t *lp = CGBitmapContextGetData(light), *sp = CGBitmapContextGetData(soft);
+    size_t lrow = CGBitmapContextGetBytesPerRow(light), srow = CGBitmapContextGetBytesPerRow(soft);
+    double inside = side * 0.06, outside = side * 0.32;
+    dispatch_apply(h, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t y) {
+        long yy = (long)y;
+        double distance = yy < top ? top - yy : yy >= bottom ? yy - bottom + 1 : -(double)MIN(yy - top, bottom - 1 - yy);
+        double progress = MAX(0.0, MIN(1.0, (distance + inside) / (outside + inside)));
+        double a = MIN(1.0, progress / 0.35), b = MAX(0.0, MIN(1.0, (progress - 0.25) / 0.75));
+        a = a * a * (3 - 2 * a);
+        b = b * b * (3 - 2 * b);
+        if (a <= 0) return;
+        uint32_t wa = (uint32_t)lround(a * 256), wb = (uint32_t)lround(b * 256);
+        uint8_t *o = p + y * row;
+        const uint8_t *l = lp + y * lrow, *s = sp + y * srow;
+        for (size_t i = 0; i < w * 4; i++) {
+            uint32_t v = (o[i] * (256 - wa) + l[i] * wa) >> 8;
+            o[i] = (uint8_t)((v * (256 - wb) + s[i] * wb) >> 8);
+        }
+    });
+    CGContextRelease(light);
+    CGContextRelease(soft);
 }
 
 static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
@@ -108,7 +131,7 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     l.moving = moving && scene.layers.count;
     // The square across the frame's width (zoomed a touch for the moves), a little above the middle, the blurred
     // cover filling the rest.
-    double strength = AUSceneMotion * AUNumber(AUKeyDepthStrength, 1.0);
+    double strength = AUSceneMotion * kLockBoost * AUNumber(AUKeyDepthStrength, 1.0);
     double zoom = l.moving ? 1 + 2 * scene.plateReach * strength + 0.006 : 1.0;
     double side = size.width * zoom;
     l.side = side;
@@ -120,19 +143,12 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     l.margin = margin;
     CGSize baseSize = CGSizeMake(size.width + 2 * margin, size.height + 2 * margin);
     CGContextRef base = bgraContext((size_t)baseSize.width, (size_t)baseSize.height, NULL, 0);
-    CGImageRef fill = blurredFill(scene.background.CGImage, baseSize);
-    if (fill) {
-        CGContextDrawImage(base, CGRectMake(0, 0, baseSize.width, baseSize.height), fill);
-        CGImageRelease(fill);
-    }
-    CGImageRef fade = edgeFade((size_t)side);
     CGRect inBase = CGRectOffset(l.picture, margin, margin);
-    CGContextSaveGState(base);
     CGContextSetInterpolationQuality(base, kCGInterpolationHigh);
-    CGContextClipToMask(base, inBase, fade);
     CGContextDrawImage(base, inBase, scene.background.CGImage);
-    CGContextRestoreGState(base);
-    CGImageRelease(fade);
+    // Rows top down in the bitmap: the square's from the top.
+    CGRect squareTopDown = CGRectMake(inBase.origin.x, baseSize.height - CGRectGetMaxY(inBase), side, side);
+    extendCover(base, squareTopDown, side);
     l.background = CGBitmapContextCreateImage(base);
     l.base = base;
     l.backgroundRect = CGRectMake(-(double)margin, -(double)margin, baseSize.width, baseSize.height);
@@ -148,10 +164,10 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     }
     CGContextRef shade = bgraContext((size_t)size.width, (size_t)size.height, NULL, 0);
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    CGFloat components[8] = {0, 0, 0, 0.45, 0, 0, 0, 0};
+    CGFloat components[8] = {0, 0, 0, 0.28, 0, 0, 0, 0};
     CGFloat locations[2] = {0, 1};
     CGGradientRef gradient = CGGradientCreateWithColorComponents(space, components, locations, 2);
-    CGContextDrawLinearGradient(shade, gradient, CGPointMake(0, 0), CGPointMake(0, size.height * 0.32), 0);
+    CGContextDrawLinearGradient(shade, gradient, CGPointMake(0, 0), CGPointMake(0, size.height * 0.28), 0);
     CGGradientRelease(gradient);
     CGColorSpaceRelease(space);
     l.shade = CGBitmapContextCreateImage(shade);
