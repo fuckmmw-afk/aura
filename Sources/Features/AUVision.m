@@ -775,6 +775,11 @@ static NSArray<NSData *> *depthParts(NSData *mask, const uint8_t *depth, size_t 
     vImageMin_Planar8(&bb, &ab, NULL, 0, 0, k, k, kvImageEdgeExtend);
     vImageMin_Planar8(&ab, &bb, NULL, 0, 0, k, k, kvImageEdgeExtend);
     vImageMax_Planar8(&bb, &ab, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    // And the far part opened the same way: a thin arm reaching over the nearer one goes with it, no sliver left.
+    for (size_t i = 0; i < n; i++) pa[i] = m[i] >= 128 && pa[i] < 128 ? 255 : 0;
+    vImageMin_Planar8(&ab, &bb, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    vImageMax_Planar8(&bb, &ab, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    for (size_t i = 0; i < n; i++) pa[i] = pa[i] >= 128 ? 0 : 255;
     uint32_t soft = (uint32_t)(side / 160) | 1;
     vImageTentConvolve_Planar8(&ab, &bb, NULL, 0, 0, soft, soft, 0, kvImageEdgeExtend);
     const uint8_t *t = b.bytes;
