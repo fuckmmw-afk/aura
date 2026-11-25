@@ -969,7 +969,12 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     [layers sortUsingComparator:^NSComparisonResult(AUSceneLayer *a, AUSceneLayer *b) { return [@(a.depth) compare:@(b.depth)]; }];
     AUScene *scene = [AUScene new];
     if (depthMap) {
-        CGImageRef full = AUGrayImage(depthMap.bytes, side, side);
+        // The objects' own relief, softened (a 30th of the side): their shape, not every crease of the model's depth.
+        NSMutableData *smooth = [NSMutableData dataWithLength:n];
+        vImage_Buffer db = {(void *)depthMap.bytes, side, side, side}, sb = {smooth.mutableBytes, side, side, side};
+        uint32_t soften = (uint32_t)(side / 30) | 1;
+        vImageTentConvolve_Planar8(&db, &sb, NULL, 0, 0, soften, soften, 0, kvImageEdgeExtend);
+        CGImageRef full = AUGrayImage(smooth.bytes, side, side);
         CGImageRef raw = full ? AUImageResized(full, 256, 256) : NULL;
         if (raw) {
             scene.rawDepth = [UIImage imageWithCGImage:raw];

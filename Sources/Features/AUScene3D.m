@@ -3,8 +3,8 @@
 static const double kMaxAngle = 0.20;        // radians at a full tilt, x1
 static const double kFocal = 1.8;
 static const double kDeep = 0.42;            // the background's far end lies this far behind the window
-static const double kRelief = 1.8;
-static const double kReliefBack = 0.05, kReliefFront = 0.12;
+static const double kRelief = 1.1;
+static const double kReliefBack = 0.04, kReliefFront = 0.08;
 
 AUCamera AUSceneCamera(AUScene *scene, CGPoint tilt, double strength) {
     AUCamera c;
@@ -83,41 +83,71 @@ static inline double gray(const uint8_t *p, size_t side, double u, double v) {
     return (top * (1 - fy) + bottom * fy) / 255.0;
 }
 
+typedef struct {
+    AUCamera camera;
+    const uint8_t *plate, *raw;
+    size_t plateSide, rawSide;
+    double still, median;
+    BOOL object, mirror;
+} AUZContext;
+
+static inline double zAt(const AUZContext *c, double qx, double qy) {
+    double u = qx + 0.5, v = qy + 0.5;
+    if (c->object) {
+        if (!c->raw) return AUCameraZ(c->camera, c->median);
+        return AUCameraObjectZ(c->camera, gray(c->raw, c->rawSide, mirror(u), mirror(v)), c->median);
+    }
+    if (c->mirror) return c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, mirror(u), mirror(v))) : c->still;
+    double inside = c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, MAX(0.0, MIN(1.0, u)), MAX(0.0, MIN(1.0, v)))) : c->still;
+    double out = MAX(0.0, MAX(fabs(qx), fabs(qy)) - 0.5);
+    double t = MIN(1.0, out / 0.05);
+    t = t * t * (3 - 2 * t);
+    return inside * (1 - t) + c->camera.zOut * t;
+}
+
+// The picture point seen at screen point s: walked back from s (start from a nearby answer, then correct).
+static inline void walkBack(const AUZContext *c, AUTurn turn, double sx, double sy, double *qx, double *qy, int steps) {
+    for (int step = 0; step < steps; step++) {
+        double px, py;
+        project(turn, *qx, *qy, zAt(c, *qx, *qy), &px, &py);
+        *qx += sx - px;
+        *qy += sy - py;
+    }
+}
+
 void AUSceneDraw3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect square, AUScene *scene, AUCamera camera,
                    AUSceneSource source) {
     if (!frame || !source.pixels || square.size.width < 1) return;
     AUTurn turn = turnOf(camera);
     NSData *plate = scene.plateBytes, *raw = scene.rawBytes;
-    const uint8_t *pp = plate.bytes, *rp = raw.bytes;
-    size_t ps = scene.plateSide, rs = scene.rawSide;
-    double still = AUCameraZ(camera, scene.backgroundDepth);
+    AUZContext context = {camera, plate.bytes, raw.bytes, scene.plateSide, scene.rawSide,
+                          AUCameraZ(camera, scene.backgroundDepth), source.median, source.object, source.mirror};
+    const AUZContext *zc = &context;
     double midX = CGRectGetMidX(square), midY = CGRectGetMidY(square), sw = square.size.width, sh = square.size.height;
     CGRect box = CGRectIsNull(source.box) ? CGRectInfinite : CGRectInset(source.box, -0.25, -0.25);
-    long y0 = 0, y1 = (long)h;
+    long y0 = 0, y1 = (long)h, xa = 0, xb = (long)w;
     if (!CGRectIsInfinite(box)) {
         y0 = MAX(0L, (long)floor(midY + CGRectGetMinY(box) * sh));
         y1 = MIN((long)h, (long)ceil(midY + CGRectGetMaxY(box) * sh));
-        if (y1 <= y0) return;
-    }
-    long xa = 0, xb = (long)w;
-    if (!CGRectIsInfinite(box)) {
         xa = MAX(0L, (long)floor(midX + CGRectGetMinX(box) * sw));
         xb = MIN((long)w, (long)ceil(midX + CGRectGetMaxX(box) * sw));
-        if (xb <= xa) return;
+        if (y1 <= y0 || xb <= xa) return;
     }
-    double (^zAt)(double, double) = ^double(double qx, double qy) {
-        double u = qx + 0.5, v = qy + 0.5;
-        if (source.object) {
-            if (!rp) return AUCameraZ(camera, source.median);
-            return AUCameraObjectZ(camera, gray(rp, rs, mirror(u), mirror(v)), source.median);
+    // The way back is smooth: found exactly on a grid every 8 pixels, and in between taken bilinearly from it.
+    enum { kCell = 8 };
+    const long gw = (xb - xa + kCell - 1) / kCell + 1, gh = (y1 - y0 + kCell - 1) / kCell + 1;
+    double *grid = malloc(sizeof(double) * 2 * gw * gh);
+    if (!grid) return;
+    dispatch_apply((size_t)gh, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t j) {
+        double sy = (y0 + (long)j * kCell + 0.5 - midY) / sh;
+        double qx = (xa + 0.5 - midX) / sw, qy = sy;
+        for (long i = 0; i < gw; i++) {
+            double sx = (xa + i * kCell + 0.5 - midX) / sw;
+            walkBack(zc, turn, sx, sy, &qx, &qy, i ? 4 : 8);
+            grid[(j * gw + i) * 2] = qx;
+            grid[(j * gw + i) * 2 + 1] = qy;
         }
-        if (source.mirror) return pp ? AUCameraZ(camera, gray(pp, ps, mirror(u), mirror(v))) : still;
-        double inside = pp ? AUCameraZ(camera, gray(pp, ps, MAX(0.0, MIN(1.0, u)), MAX(0.0, MIN(1.0, v)))) : still;
-        double out = MAX(0.0, MAX(fabs(qx), fabs(qy)) - 0.5);
-        double t = MIN(1.0, out / 0.05);
-        t = t * t * (3 - 2 * t);
-        return inside * (1 - t) + camera.zOut * t;
-    };
+    });
     const size_t width = source.width, height = source.height, row = source.row;
     const uint8_t *src = source.pixels;
     CGRect ss = source.square;
@@ -125,23 +155,15 @@ void AUSceneDraw3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect s
     dispatch_apply((size_t)(y1 - y0), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t index) {
         long y = y0 + (long)index;
         uint8_t *out = frame + y * frameRow;
-        double sy = (y + 0.5 - midY) / sh;
-        double qx = 0, qy = sy;
-        BOOL started = NO;
+        long j = (y - y0) / kCell;
+        double ty = ((y - y0) % kCell) / (double)kCell;
+        const double *r0 = grid + j * gw * 2, *r1 = grid + MIN(j + 1, gh - 1) * gw * 2;
         for (long x = xa; x < xb; x++) {
-            double sx = (x + 0.5 - midX) / sw;
-            // Walk back from the screen: start from the last pixel's answer (the picture is smooth), then correct.
-            if (!started) {
-                qx = sx;
-                qy = sy;
-                started = YES;
-            }
-            for (int step = 0; step < 4; step++) {
-                double px, py;
-                project(turn, qx, qy, zAt(qx, qy), &px, &py);
-                qx += sx - px;
-                qy += sy - py;
-            }
+            long i = (x - xa) / kCell;
+            double tx = ((x - xa) % kCell) / (double)kCell;
+            long i1 = MIN(i + 1, gw - 1);
+            double qx = (r0[i * 2] * (1 - tx) + r0[i1 * 2] * tx) * (1 - ty) + (r1[i * 2] * (1 - tx) + r1[i1 * 2] * tx) * ty;
+            double qy = (r0[i * 2 + 1] * (1 - tx) + r0[i1 * 2 + 1] * tx) * (1 - ty) + (r1[i * 2 + 1] * (1 - tx) + r1[i1 * 2 + 1] * tx) * ty;
             double u = qx + 0.5, v = qy + 0.5;
             if (mirrored) {
                 u = mirror(u);
@@ -155,6 +177,7 @@ void AUSceneDraw3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect s
             uint32_t ax = (uint32_t)((fx - ix) * 256), ay = (uint32_t)((fy - iy) * 256);
             const uint8_t *a = src + iy * row + ix * 4, *b = a + (iy + 1 < height ? row : 0);
             size_t step4 = ix + 1 < width ? 4 : 0;
+            if (object && !a[3] && !a[step4 + 3] && !b[3] && !b[step4 + 3]) continue;
             uint8_t px[4];
             for (int c = 0; c < 4; c++) {
                 uint32_t top = a[c] * (256 - ax) + a[c + step4] * ax, bottom = b[c] * (256 - ax) + b[c + step4] * ax;
@@ -171,6 +194,7 @@ void AUSceneDraw3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect s
             for (int c = 0; c < 4; c++) o[c] = (uint8_t)MIN(255u, px[c] + (o[c] * (255 - alpha) + 127) / 255);
         }
     });
+    free(grid);
 }
 
 CGRect AUSceneAlphaBox(const uint8_t *pixels, size_t row, size_t side) {
