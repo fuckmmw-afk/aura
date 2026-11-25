@@ -165,15 +165,24 @@ NSArray<NSData *> *AUSamObjects(CGImageRef square, size_t side, const uint8_t *d
     }
     NSMutableArray<NSData *> *result = [NSMutableArray array];
     NSMutableArray<NSString *> *kept = [NSMutableArray array];
-    uint8_t *ring = malloc(kLow * kLow), *own = malloc(kLow * kLow);
+    uint8_t *ring = malloc(kLow * kLow), *own = malloc(kLow * kLow), *near = malloc(kLow * kLow);
+    BOOL nearStale = YES;
     for (int c = 0; c < found && result.count < limit; c++) {
         AUCandidate *candidate = &candidates[c];
-        size_t free_ = 0;
-        for (int i = 0; i < kLow * kLow; i++) {
-            own[i] = candidate->mask[i] && !claimed[i] ? 255 : 0;
-            free_ += own[i] != 0;
+        // What is held, grown a little: a candidate that touches or overlaps an object already kept is a piece of it
+        // (half a statue, a fragment of a collage) or a group around it, and moving apart from it would tear it.
+        if (nearStale) {
+            vImage_Buffer cb = {claimed, kLow, kLow, kLow}, nb = {near, kLow, kLow, kLow};
+            vImageMax_Planar8(&cb, &nb, NULL, 0, 0, 7, 7, kvImageEdgeExtend);
+            nearStale = NO;
         }
-        if (free_ < candidate->area * 0.6 || free_ < kLow * kLow * minArea) continue;
+        size_t touching = 0;
+        for (int i = 0; i < kLow * kLow; i++) {
+            own[i] = candidate->mask[i];
+            touching += candidate->mask[i] && near[i];
+        }
+        size_t free_ = candidate->area;
+        if (touching > candidate->area * 0.12) continue;
         // In front of its surroundings: its median depth over that of a ring around it.
         if (depthLow) {
             vImage_Buffer ob = {own, kLow, kLow, kLow}, rb = {ring, kLow, kLow, kLow};
@@ -186,14 +195,18 @@ NSArray<NSData *> *AUSamObjects(CGImageRef square, size_t side, const uint8_t *d
             [kept addObject:[NSString stringWithFormat:@"%.0f%%/%.2f", 100.0 * free_ / (kLow * kLow), ((double)inside - around) / 255]];
         }
         for (int i = 0; i < kLow * kLow; i++) if (own[i]) claimed[i] = 255;
+        nearStale = YES;
         // The soft edge from the logits (sigmoid-ish over -2...2), only where this object is kept, at full size.
-        uint8_t *soft = malloc(kLow * kLow);
+        uint8_t *soft = malloc(kLow * kLow), *smooth = malloc(kLow * kLow);
         for (int i = 0; i < kLow * kLow; i++) {
             double t = MAX(0.0, MIN(1.0, (candidate->logits[i] + 2) / 4));
-            BOOL near = own[i] || (candidate->mask[i] == 0 && !claimed[i]);
-            soft[i] = near ? (uint8_t)lround(255 * t * t * (3 - 2 * t)) : 0;
-            if (candidate->mask[i] && !own[i]) soft[i] = 0;
+            soft[i] = (uint8_t)lround(255 * t * t * (3 - 2 * t));
         }
+        // Smoothed at the low size before it is enlarged: no staircase along its edge.
+        vImage_Buffer sb = {soft, kLow, kLow, kLow}, mb = {smooth, kLow, kLow, kLow};
+        vImageTentConvolve_Planar8(&sb, &mb, NULL, 0, 0, 3, 3, 0, kvImageEdgeExtend);
+        memcpy(soft, smooth, kLow * kLow);
+        free(smooth);
         CGImageRef small = AUGrayImage(soft, kLow, kLow);
         free(soft);
         NSMutableData *big = [NSMutableData dataWithLength:side * side];
@@ -208,6 +221,7 @@ NSArray<NSData *> *AUSamObjects(CGImageRef square, size_t side, const uint8_t *d
     }
     free(ring);
     free(own);
+    free(near);
     free(claimed);
     free(depthLow);
     for (int c = 0; c < found; c++) {

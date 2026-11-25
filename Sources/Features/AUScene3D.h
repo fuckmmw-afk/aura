@@ -28,7 +28,7 @@ AUCamera AUSceneCamera(AUScene *scene, CGPoint tilt, double strength);
 // How much the picture is zoomed into its frame so the swing never shows an edge.
 double AUSceneZoom(double strength);
 double AUCameraZ(AUCamera c, double depth);
-double AUCameraObjectZ(AUCamera c, double depth, double median);
+double AUCameraObjectZ(AUCamera c, double depth, double median, double relief);
 // A picture point (at distance z) to where it is seen.
 CGPoint AUCameraProject(AUCamera c, CGPoint p, double z);
 
@@ -40,6 +40,7 @@ typedef struct {
     double median;              // an object's depth
     BOOL mirror;                // past the square: the picture mirrored (as the app's sampler), else these pixels (a flat wall)
     CGRect box;                 // an object's extent, picture units; CGRectNull for everywhere
+    double relief;              // an object's own relief share (AUSceneLayer.relief)
 } AUSceneSource;
 
 // Draws `source` as seen by the camera into `frame` (w x h, the picture's square at `square` there), each pixel found

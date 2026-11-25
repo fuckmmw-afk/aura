@@ -9,6 +9,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface AUSceneLayer : NSObject
 @property (nonatomic, strong) UIImage *image;   // the canvas's size, the object alone, edges feathered
 @property (nonatomic) double depth;             // its median depth, 0 far ... 1 near
+@property (nonatomic) double relief;            // 0...1: its own relief is kept within this share (a body deep from front
+                                                // to back — an arm toward the camera — gets less, so it does not tear)
 @end
 
 @interface AUScene : NSObject
@@ -22,6 +24,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) double backgroundDepth;
 @property (nonatomic) BOOL inpainted;                         // painted by the model, not the quick fallback
 @property (nonatomic) BOOL segmented;                         // SAM looked for every object (not only Vision's subjects)
+// What the cover is, measured when it was taken apart, and what that asks of the camera: a close-up face wants a
+// small swing and almost no relief, a flat picture (a drawing, a collage, a graphic) little depth, a deep scene all.
+@property (nonatomic) double styleSwing, styleDeep, styleRelief;   // multiples, 1 = as set
+@property (nonatomic, copy, nullable) NSString *styleName;
 @property (nonatomic, copy, nullable) NSString *tune;          // AUTuneSignature(AUTuneScene) it was made with
 @property (nonatomic, readonly) BOOL complete;                // both: nothing to make again once the models are here
 // Everything moves by its depth around the background's median c: a point at depth d shifts by tilt x motion x side

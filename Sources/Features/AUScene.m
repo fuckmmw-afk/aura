@@ -2,9 +2,13 @@
 #import "AUImage.h"
 #import "Core/AUTune.h"
 
-static NSString *const kVersion = @"scene-v4";
+static NSString *const kVersion = @"scene-v5";
 
 @implementation AUSceneLayer
+- (instancetype)init {
+    if ((self = [super init])) _relief = 1;
+    return self;
+}
 @end
 
 const double AUSceneMotion = 0.08;
@@ -24,6 +28,11 @@ static const double kPlateLimit = 0.6, kObjectLeast = 0.3;
 
 - (double)plateCenter { return _backgroundDepth; }
 - (BOOL)complete { return _inpainted && _segmented; }
+
+- (instancetype)init {
+    if ((self = [super init])) _styleSwing = _styleDeep = _styleRelief = 1;
+    return self;
+}
 - (double)tallness { return _tall && _tallness >= 1 ? _tallness : 1; }
 - (double)plateLimit { return kPlateLimit; }
 
@@ -136,17 +145,19 @@ static NSData *grayBytes(CGImageRef image, size_t *outSide) {
     NSFileManager *files = NSFileManager.defaultManager;
     [files createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil];
     if (![AUJPEGData(_background.CGImage, 0.9) writeToFile:[folder stringByAppendingPathComponent:@"scene-background.jpg"] atomically:YES]) return NO;
-    NSMutableArray *depths = [NSMutableArray array];
+    NSMutableArray *depths = [NSMutableArray array], *reliefs = [NSMutableArray array];
     for (NSUInteger i = 0; i < _layers.count; i++) {
         NSString *path = [folder stringByAppendingPathComponent:[NSString stringWithFormat:@"scene-layer-%lu.png", (unsigned long)i]];
         if (![AUPNGData(_layers[i].image.CGImage) writeToFile:path atomically:YES]) return NO;
         [depths addObject:@(_layers[i].depth)];
+        [reliefs addObject:@(_layers[i].relief)];
     }
     if (_plateDepth.CGImage && ![AUPNGData(_plateDepth.CGImage) writeToFile:[folder stringByAppendingPathComponent:@"scene-depth.png"] atomically:YES]) return NO;
     if (_tall.CGImage && ![AUJPEGData(_tall.CGImage, 0.9) writeToFile:[folder stringByAppendingPathComponent:@"scene-tall.jpg"] atomically:YES]) return NO;
     if (_rawDepth.CGImage && ![AUPNGData(_rawDepth.CGImage) writeToFile:[folder stringByAppendingPathComponent:@"scene-raw.png"] atomically:YES]) return NO;
     NSDictionary *plist = @{@"version": kVersion, @"square": @[@(_square.origin.x), @(_square.origin.y), @(_square.size.width), @(_square.size.height)],
-                            @"depths": depths, @"backgroundDepth": @(_backgroundDepth), @"inpainted": @(_inpainted), @"segmented": @(_segmented), @"tallness": @(_tallness), @"tune": _tune ?: @""};
+                            @"depths": depths, @"backgroundDepth": @(_backgroundDepth), @"inpainted": @(_inpainted), @"segmented": @(_segmented), @"tallness": @(_tallness), @"tune": _tune ?: @"", @"reliefs": reliefs,
+                            @"style": @[@(_styleSwing), @(_styleDeep), @(_styleRelief)], @"styleName": _styleName ?: @""};
     return [plist writeToFile:[folder stringByAppendingPathComponent:@"scene.plist"] atomically:YES];
 }
 
@@ -177,6 +188,13 @@ static NSData *grayBytes(CGImageRef image, size_t *outSide) {
     scene.backgroundDepth = [plist[@"backgroundDepth"] doubleValue];
     scene.inpainted = [plist[@"inpainted"] boolValue];
     scene.segmented = [plist[@"segmented"] boolValue];
+    NSArray *style = plist[@"style"];
+    if ([style isKindOfClass:NSArray.class] && style.count == 3) {
+        scene.styleSwing = [style[0] doubleValue];
+        scene.styleDeep = [style[1] doubleValue];
+        scene.styleRelief = [style[2] doubleValue];
+    }
+    scene.styleName = plist[@"styleName"];
     CGImageRef tall = AUImageFromData([NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"scene-tall.jpg"]]);
     if (tall) {
         scene.tall = [UIImage imageWithCGImage:tall];
@@ -190,6 +208,8 @@ static NSData *grayBytes(CGImageRef image, size_t *outSide) {
         AUSceneLayer *layer = [AUSceneLayer new];
         layer.image = [UIImage imageWithCGImage:image];
         layer.depth = [depths[i] doubleValue];
+        NSArray *reliefs = plist[@"reliefs"];
+        if ([reliefs isKindOfClass:NSArray.class] && i < reliefs.count) layer.relief = [reliefs[i] doubleValue];
         CGImageRelease(image);
         [layers addObject:layer];
     }

@@ -35,6 +35,7 @@ NSArray<AUTuneSection *> *AUTuneSections(void) {
     dispatch_once(&once, ^{
         sections = @[
             section(@"Камера и глубина", @"Сразу. Сцена — объёмная модель обложки; при наклоне телефона камера поворачивается вокруг середины.", @[
+                item(@"adaptive", @"Подстройка под обложку", @"Крупный план лица — меньше поворот и рельеф, плоская картинка/коллаж — меньше глубины и без поиска мелких объектов", 1, 0, 1, 1, AUTuneSwitch, AUTuneLive),
                 item(@"swing", @"Размах поворота", @"Угол камеры при полном наклоне", 14, 3, 35, 0.5, AUTuneDegrees, AUTuneLive),
                 item(@"deep", @"Глубина сцены", @"Насколько далеко за обложкой дальний фон", 0.42, 0.05, 1.2, 0.01, AUTunePlain, AUTuneLive),
                 item(@"window", @"Плоскость окна", @"0% — фон в плоскости обложки (всё выходит вперёд), 100% — ближний объект в ней (всё уходит вглубь)", 0.70, 0, 1, 0.01, AUTunePercent, AUTuneLive),
@@ -50,6 +51,9 @@ NSArray<AUTuneSection *> *AUTuneSections(void) {
                 item(@"tiltFull", @"Наклон до упора", @"Насколько наклонить телефон для полного поворота (изменение гравитации)", 0.15, 0.04, 0.5, 0.01, AUTunePlain, AUTuneLive),
                 item(@"follow", @"Возврат к центру", @"За сколько секунд положение, в котором держишь телефон, становится «ровным»", 6, 0.5, 30, 0.5, AUTuneSeconds, AUTuneLive),
                 item(@"smooth", @"Плавность", @"Сглаживание движения", 0.05, 0.005, 0.4, 0.005, AUTuneSeconds, AUTuneLive),
+                item(@"wake", @"Порог движения", @"Насколько повернуть телефон, чтобы сцена ожила (меньше — чаще перерисовка, теплее)", 0.012, 0.002, 0.05, 0.001, AUTunePlain, AUTuneLive),
+                item(@"appFps", @"Кадров в секунду", @"При перегреве — не больше 30", 60, 24, 120, 1, AUTuneCount, AUTuneLive),
+                item(@"appScale", @"Чёткость сцены", @"Пикселей на точку: 3 — как экран, 2 — заметно холоднее", 2, 1, 3, 0.25, AUTunePlain, AUTuneLive),
                 item(@"invertX", @"Инвертировать по горизонтали", nil, 0, 0, 1, 1, AUTuneSwitch, AUTuneLive),
                 item(@"invertY", @"Инвертировать по вертикали", nil, 0, 0, 1, 1, AUTuneSwitch, AUTuneLive),
             ]),
@@ -69,7 +73,7 @@ NSArray<AUTuneSection *> *AUTuneSections(void) {
                 item(@"orbitX", @"Орбита по горизонтали", nil, 1.0, 0, 1.5, 0.05, AUTunePlain, AUTuneLock),
                 item(@"orbitY", @"Орбита по вертикали", nil, 0.7, 0, 1.5, 0.05, AUTunePlain, AUTuneLock),
                 item(@"loop", @"Длина круга", nil, 6, 2, 16, 0.5, AUTuneSeconds, AUTuneLock),
-                item(@"fps", @"Кадров в секунду", nil, 30, 15, 60, 1, AUTuneCount, AUTuneLock),
+                item(@"fps", @"Кадров в секунду", nil, 24, 15, 60, 1, AUTuneCount, AUTuneLock),
                 item(@"lockBlurFrom", @"Блюр: начало", @"Доля высоты кадра", 0.74, 0.3, 1, 0.01, AUTunePercent, AUTuneLock),
                 item(@"lockBlurTo", @"Блюр: полностью", nil, 1.0, 0.4, 1.3, 0.01, AUTunePercent, AUTuneLock),
                 item(@"lockBlur", @"Сила блюра", nil, 1.0, 0, 4, 0.1, AUTuneTimes, AUTuneLock),
@@ -83,7 +87,7 @@ NSArray<AUTuneSection *> *AUTuneSections(void) {
                 item(@"samGrid", @"Точек поиска", @"Сетка N×N по обложке: больше — мельче объекты, дольше", 8, 3, 16, 1, AUTuneCount, AUTuneScene),
                 item(@"samScore", @"Уверенность модели", nil, 0.65, 0.3, 0.98, 0.01, AUTunePercent, AUTuneScene),
                 item(@"samStability", @"Стабильность маски", nil, 0.80, 0.3, 0.99, 0.01, AUTunePercent, AUTuneScene),
-                item(@"samContrast", @"Выступ по глубине", @"Насколько объект должен быть ближе своего окружения; 0 — брать всё", 0.025, 0, 0.3, 0.005, AUTunePlain, AUTuneScene),
+                item(@"samContrast", @"Выступ по глубине", @"Насколько объект должен быть ближе своего окружения; 0 — брать всё", 0.04, 0, 0.3, 0.005, AUTunePlain, AUTuneScene),
                 item(@"samMinArea", @"Минимальный размер", nil, 0.003, 0.0005, 0.05, 0.0005, AUTunePercent, AUTuneScene),
                 item(@"samMaxArea", @"Максимальный размер", nil, 0.30, 0.05, 0.8, 0.01, AUTunePercent, AUTuneScene),
                 item(@"visionObjects", @"Объекты Vision", @"Люди и главный объект от системы", 6, 0, 12, 1, AUTuneCount, AUTuneScene),

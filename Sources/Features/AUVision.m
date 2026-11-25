@@ -903,11 +903,48 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         }
         masks = parts;
     }
+    // What the cover is: how far its depth reaches (10th to 90th percentile) and how much of it the largest object
+    // fills. A face filling the frame wants a small swing and almost no relief; a flat picture (a drawing, a collage,
+    // a graphic: the depth model sees little room in it) little depth and no hunt for small pieces; a deep scene all.
+    double spread = 0.5, largest = 0;
+    if (depthMap) {
+        size_t histogram[256] = {0};
+        const uint8_t *dp = depthMap.bytes;
+        for (size_t i = 0; i < n; i++) histogram[dp[i]]++;
+        size_t seen = 0;
+        int p10 = 0, p90 = 255;
+        for (int v = 0; v < 256; v++) {
+            size_t before = seen;
+            seen += histogram[v];
+            if (before < n / 10 && seen >= n / 10) p10 = v;
+            if (before < n * 9 / 10 && seen >= n * 9 / 10) p90 = v;
+        }
+        spread = (p90 - p10) / 255.0;
+    }
+    for (NSData *mask in masks) {
+        const uint8_t *m = mask.bytes;
+        size_t area = 0;
+        for (size_t i = 0; i < n; i++) area += m[i] >= 128;
+        largest = MAX(largest, area / (double)n);
+    }
+    double styleSwing = 1, styleDeep = 1, styleRelief = 1;
+    NSString *styleName = @"обычная";
+    BOOL flat = spread < 0.28;
+    if (largest >= 0.30) {
+        styleSwing = 0.6; styleDeep = 0.7; styleRelief = 0.3; styleName = @"крупный план";
+    } else if (flat) {
+        styleSwing = 0.85; styleDeep = 0.55; styleRelief = 0.4; styleName = @"плоская";
+    } else if (spread >= 0.55) {
+        styleDeep = 1.1; styleName = @"глубокая";
+    }
+    BOOL adapt = AUTuneOn(@"adaptive");
+
     // Then every other object SAM sees that stands in front of what is around it: each sheep of a flock, a tree.
+    // Not on a flat picture: there it finds pieces of a collage or of lettering, which only tear.
     BOOL segmented = NO;
     NSString *samLog = nil;
     NSUInteger most = (NSUInteger)lround(AUTune(@"maxObjects"));
-    if (!peopleOnly && AUTuneOn(@"sam") && masks.count < most) {
+    if (!peopleOnly && AUTuneOn(@"sam") && masks.count < most && !(adapt && flat)) {
         NSMutableData *held = [NSMutableData dataWithLength:n];
         uint8_t *h = held.mutableBytes;
         for (NSData *mask in masks) {
@@ -952,6 +989,13 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         CGImageRef painted = lamaFill(lama, square, g, side, side, squareIn, &why);
         if (painted) {
             CGContextDrawImage(canvas, CGRectMake(0, 0, cw, ch), painted);
+            // LaMa paints at 256 px: softened a touch, its blocks do not show where the cover is enlarged.
+            vImage_Buffer cb = {CGBitmapContextGetData(canvas), ch, cw, CGBitmapContextGetBytesPerRow(canvas)};
+            NSMutableData *scratch = [NSMutableData dataWithLength:cb.rowBytes * ch];
+            vImage_Buffer sbuf = {scratch.mutableBytes, ch, cw, cb.rowBytes};
+            uint32_t k = (uint32_t)(side / 160) | 1;
+            vImageTentConvolve_ARGB8888(&cb, &sbuf, NULL, 0, 0, k, k, NULL, kvImageEdgeExtend);
+            memcpy(cb.data, sbuf.data, cb.rowBytes * ch);
             CGImageRelease(painted);
             inpainted = YES;
             AUStatRecord(@"inpaint", AUNowMs() - t);
@@ -1016,6 +1060,23 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         sceneLayer.image = [UIImage imageWithCGImage:made];
         CGImageRelease(made);
         sceneLayer.depth = [ordered[index][0] doubleValue];
+        // Its own depth's reach (10th to 90th percentile inside it): the deeper a body runs front to back, the less of
+        // it is lifted as relief, so an arm toward the camera does not drag the face along.
+        if (depthMap) {
+            size_t histogram[256] = {0}, count = 0;
+            const uint8_t *dp = depthMap.bytes, *m = mask.bytes;
+            for (size_t i = 0; i < n; i++) if (m[i] >= 128) { histogram[dp[i]]++; count++; }
+            size_t seen = 0;
+            int p10 = 0, p90 = 0;
+            for (int v = 0; v < 256 && count; v++) {
+                size_t before = seen;
+                seen += histogram[v];
+                if (before < count / 10 && seen >= count / 10) p10 = v;
+                if (before < count * 9 / 10 && seen >= count * 9 / 10) p90 = v;
+            }
+            double own = (p90 - p10) / 255.0;
+            sceneLayer.relief = MAX(0.15, MIN(1.0, 0.10 / MAX(0.02, own)));
+        }
         [layers addObject:sceneLayer];
     }
     CGColorSpaceRelease(rgb);
@@ -1075,12 +1136,17 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     scene.inpainted = inpainted;
     scene.segmented = segmented;
     scene.tune = AUTuneSignature(AUTuneScene);
+    scene.styleSwing = styleSwing;
+    scene.styleDeep = styleDeep;
+    scene.styleRelief = styleRelief;
+    scene.styleName = [NSString stringWithFormat:@"%@ (глубина %.2f, крупнейший %.0f%%)", styleName, spread, largest * 100];
     NSMutableArray *depths = [NSMutableArray array];
     for (AUSceneLayer *layer in layers) [depths addObject:[NSString stringWithFormat:@"%.2f", layer.depth]];
     NSString *summary = [NSString stringWithFormat:@"scene %zu px: %lu objects (depth %@ over %.2f), background %@ in %.0f ms",
                          side, (unsigned long)layers.count, [depths componentsJoinedByString:@" "], backgroundDepth,
                          inpainted ? @"painted by LaMa" : [@"blur fill: " stringByAppendingString:why ?: @"?"], AUNowMs() - started];
     if (samLog) summary = [summary stringByAppendingFormat:@"; %@", samLog];
+    summary = [summary stringByAppendingFormat:@"; обложка: %@", scene.styleName];
     if (log) *log = summary;
     return scene;
 }

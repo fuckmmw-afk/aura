@@ -14,14 +14,17 @@ AUCamera AUSceneCamera(AUScene *scene, CGPoint tilt, double strength) {
     front = MIN(0.98, MAX(front, background + 0.1));
     double low = MIN(scene.plateLow, background);
     c.pivot = background + AUTune(@"window") * (front - background);
-    c.scale = MIN(4.0, AUTune(@"deep") / MAX(0.15, c.pivot - low));
+    // The cover's own style (AUScene.style*) scales the swing, the depth and the relief, unless switched off.
+    BOOL adapt = AUTuneOn(@"adaptive");
+    double styleSwing = adapt ? scene.styleSwing : 1, styleDeep = adapt ? scene.styleDeep : 1, styleRelief = adapt ? scene.styleRelief : 1;
+    c.scale = MIN(1.6, AUTune(@"deep") * styleDeep / MAX(0.15, c.pivot - low));
     c.focal = AUTune(@"focal");
-    c.relief = AUTune(@"relief");
+    c.relief = AUTune(@"relief") * styleRelief;
     c.reliefBack = AUTune(@"reliefBack");
     c.reliefFront = AUTune(@"reliefFront");
     c.zFar = AUTune(@"zFar");
     c.zNear = MIN(AUTune(@"zNear"), c.focal * 0.8);
-    double swing = AUTune(@"swing") * M_PI / 180;
+    double swing = AUTune(@"swing") * styleSwing * M_PI / 180;
     c.angleX = tilt.x * swing * strength;
     c.angleY = tilt.y * swing * strength;
     c.zOut = AUCameraZ(c, background);
@@ -36,9 +39,10 @@ double AUCameraZ(AUCamera c, double depth) {
     return MAX(-c.zFar, MIN(c.zNear, (depth - c.pivot) * c.scale));
 }
 
-double AUCameraObjectZ(AUCamera c, double depth, double median) {
-    double own = MAX(-c.reliefBack, MIN(c.reliefFront, depth - median)) * c.relief;
-    return MAX(-c.zFar, MIN(c.zNear, (median + own - c.pivot) * c.scale));
+double AUCameraObjectZ(AUCamera c, double depth, double median, double relief) {
+    // The relief in depth units, not stretched by the scene's depth scale: a body stays a body however deep the room.
+    double own = MAX(-c.reliefBack, MIN(c.reliefFront, depth - median)) * c.relief * relief / MAX(1.0, c.scale);
+    return MAX(-c.zFar, MIN(c.zNear, (median - c.pivot) * c.scale + own * c.scale));
 }
 
 typedef struct {
@@ -87,7 +91,7 @@ typedef struct {
     const uint8_t *plate, *raw;
     size_t plateSide, plateHigh, rawSide;
     double tall;            // the plate's height over its width: v runs 0...tall over it
-    double still, median;
+    double still, median, relief;
     BOOL object, mirror;
 } AUZContext;
 
@@ -95,7 +99,7 @@ static inline double zAt(const AUZContext *c, double qx, double qy) {
     double u = qx + 0.5, v = qy + 0.5;
     if (c->object) {
         if (!c->raw) return AUCameraZ(c->camera, c->median);
-        return AUCameraObjectZ(c->camera, gray(c->raw, c->rawSide, c->rawSide, mirror(u), mirror(v)), c->median);
+        return AUCameraObjectZ(c->camera, gray(c->raw, c->rawSide, c->rawSide, mirror(u), mirror(v)), c->median, c->relief);
     }
     if (c->mirror) return c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, c->plateHigh, mirror(u), mirror(v) / c->tall)) : c->still;
     double inside = c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, c->plateHigh, MAX(0.0, MIN(1.0, u)),
@@ -123,7 +127,7 @@ void AUSceneDraw3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect s
     NSData *plate = scene.plateBytes, *raw = scene.rawBytes;
     AUZContext context = {camera, plate.bytes, raw.bytes, scene.plateSide, scene.plateHigh, scene.rawSide,
                           scene.plateHigh && scene.plateSide ? scene.plateHigh / (double)scene.plateSide : 1,
-                          AUCameraZ(camera, scene.backgroundDepth), source.median, source.object, source.mirror};
+                          AUCameraZ(camera, scene.backgroundDepth), source.median, source.relief, source.object, source.mirror};
     const AUZContext *zc = &context;
     double midX = CGRectGetMidX(square), midY = CGRectGetMidY(square), sw = square.size.width, sh = square.size.height;
     CGRect box = CGRectIsNull(source.box) ? CGRectInfinite : CGRectInset(source.box, -0.25, -0.25);

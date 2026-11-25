@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import "Core/AUCore.h"
 #import "Features/AUImage.h"
+#import "Core/AUTune.h"
 #import "Features/AUScene3D.h"
 #import <Metal/Metal.h>
 
@@ -20,7 +21,7 @@ vertex VOut au_mesh(uint vid [[vertex_id]], const device float2 *grid [[buffer(1
     float2 uv = float2(mix(c.range.x, c.range.y, g.x), mix(c.rangeY.x, c.rangeY.y, g.y));\n\
     float d = depth.sample(sd, c.kind < 0.5 ? float2(uv.x, uv.y / c.plateTall) : uv, level(0)).r;\n\
     float z = c.kind < 0.5 ? (d - c.pivot) * c.scale\n\
-        : (c.median + clamp(d - c.median, -c.reliefBack, c.reliefFront) * c.relief - c.pivot) * c.scale;\n\
+        : (c.median - c.pivot) * c.scale + clamp(d - c.median, -c.reliefBack, c.reliefFront) * c.relief * c.scale;\n\
     z = clamp(z, -c.zFar, c.zNear);\n\
     float2 q = uv - 0.5;\n\
     float k = (c.focal - z) / c.focal;\n\
@@ -56,7 +57,7 @@ enum { kGrid = 96 };
     NSUInteger _indexCount;
     id<MTLTexture> _background, _plate, _raw;
     NSArray<id<MTLTexture>> *_objects;
-    NSArray<NSNumber *> *_medians;
+    NSArray<NSNumber *> *_medians, *_reliefs;
     AUScene *_scene;
     double _texTall;
 }
@@ -197,21 +198,24 @@ static id<MTLTexture> grayTexture(NSData *bytes, size_t side) {
     NSData *flatBytes = [NSData dataWithBytes:(uint8_t[4]){flat, flat, flat, flat} length:4];
     _plate = grayTexture(scene.plateBytes, scene.plateSide) ?: grayTexture(flatBytes, 2);
     _raw = grayTexture(scene.rawBytes, scene.rawSide) ?: _plate;
-    NSMutableArray *objects = [NSMutableArray array], *medians = [NSMutableArray array];
+    NSMutableArray *objects = [NSMutableArray array], *medians = [NSMutableArray array], *reliefs = [NSMutableArray array];
     for (AUSceneLayer *layer in scene.layers) {
         id<MTLTexture> texture = colorTexture(layer.image.CGImage, YES);
         if (!texture) continue;
         [objects addObject:texture];
         [medians addObject:@(layer.depth)];
+        [reliefs addObject:@(layer.relief)];
     }
     _objects = objects;
     _medians = medians;
+    _reliefs = reliefs;
 }
 
 - (void)layoutForScale:(CGFloat)scale {
     CGSize size = _layer.bounds.size;
     if (size.width < 1 || size.height < 1) return;
-    CGFloat pixels = MIN(scale, 2048 / MAX(size.width, size.height));
+    // Two pixels a point at most: the picture is a cover enlarged, three would only cost heat.
+    CGFloat pixels = MIN(MIN(scale, AUTune(@"appScale")), 2048 / MAX(size.width, size.height));
     _layer.contentsScale = pixels;
     CGSize drawable = CGSizeMake(round(size.width * pixels), round(size.height * pixels));
     if (!CGSizeEqualToSize(_layer.drawableSize, drawable)) _layer.drawableSize = drawable;
@@ -244,6 +248,7 @@ static id<MTLTexture> grayTexture(NSData *bytes, size_t side) {
         cam.kind = 1;
         for (NSUInteger i = 0; i < _objects.count; i++) {
             cam.median = _medians[i].floatValue;
+            cam.relief = (float)(camera.relief * _reliefs[i].doubleValue / MAX(1.0, camera.scale));
             [encoder setVertexBytes:&cam length:sizeof(cam) atIndex:0];
             [encoder setFragmentTexture:_objects[i] atIndex:0];
             [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:_indexCount indexType:MTLIndexTypeUInt16 indexBuffer:_indices indexBufferOffset:0];

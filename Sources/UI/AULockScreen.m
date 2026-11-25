@@ -31,6 +31,7 @@ typedef struct {
     CGContextRef objects[16];     // each object, premultiplied, the square's size
     CGRect boxes[16];             // where each lies, picture units
     double medians[16];
+    double reliefs[16];
     int count;
     CGImageRef shade;
     CGSize size;
@@ -183,6 +184,7 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
         l.objects[l.count] = c;
         l.boxes[l.count] = AUSceneAlphaBox(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), (size_t)side);
         l.medians[l.count] = object.depth;
+        l.reliefs[l.count] = object.relief;
         l.count++;
     }
     CGContextRef shade = bgraContext((size_t)size.width, (size_t)size.height, NULL, 0);
@@ -222,7 +224,7 @@ static void drawFrame(CGContextRef context, AUClipLayers *l, AUScene *scene, dou
             CGContextRef o = l->objects[i];
             AUSceneSource object = {CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), CGBitmapContextGetWidth(o),
                                     CGBitmapContextGetHeight(o), CGRectMake(0, 0, CGBitmapContextGetWidth(o), CGBitmapContextGetHeight(o)),
-                                    YES, l->medians[i], NO, l->boxes[i]};
+                                    YES, l->medians[i], NO, l->boxes[i], l->reliefs[i]};
             AUSceneDraw3D(frame, row, w, h, l->square, scene, camera, object);
         }
     } else {
@@ -401,6 +403,7 @@ static UIImage *filled(UIImage *image, CGSize size) {
 @property (nonatomic, strong) AUScene *scene;
 @property (nonatomic) BOOL moving;
 @property (nonatomic, copy) NSString *signature;
+@property (nonatomic) BOOL partial;   // made before the scene was ready: the cover still, offered again once it is
 @end
 
 @implementation AULockMaterial
@@ -442,8 +445,13 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
             BOOL ours = artwork && (!uri.length || [artwork.trackURI isEqualToString:uri]);
             NSString *playing = AUTaurusTrackURI();
             other = uri.length && playing.length && ![playing isEqualToString:uri];
-            if (ours && (settled(artwork, moving) || CACurrentMediaTime() > deadline)) {
+            if (ours && settled(artwork, moving)) {
                 material = materialOf(artwork, moving);
+                done = material != nil;
+            } else if (ours && CACurrentMediaTime() > deadline) {
+                // The scene is still being made: the cover, still, at once; the flight comes with a second offer.
+                material = materialOf(artwork, NO);
+                material.partial = moving;
                 done = material != nil;
             }
         });
@@ -458,6 +466,8 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
 
 @implementation AULockScreen {
     NSString *_offeredFor;   // track URI and mode of the last offer
+    NSString *_partialFor;   // the track whose offer held the still cover only, waiting for its scene
+    NSUInteger _offers;
 }
 
 + (instancetype)shared {
@@ -490,8 +500,13 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
     NSString *title = AUTaurusTrackTitle();
     if (!uri.length || !title.length) return;
     NSString *offer = [NSString stringWithFormat:@"%@|%ld", uri, (long)mode];
-    if ([offer isEqualToString:_offeredFor]) return;
+    AUArtwork *current = [AUPipeline shared].current;
+    BOOL upgrade = [_partialFor isEqualToString:uri] && [current.trackURI isEqualToString:uri] && settled(current, YES);
+    if ([offer isEqualToString:_offeredFor] && !upgrade) return;
+    if (upgrade) AULog(@"lock screen: the scene is ready, the flight offered again");
+    _partialFor = nil;
     _offeredFor = offer;
+    _offers++;
     void (*setExtras)(NSString *, NSDictionary *, NSString *) = (void (*)(NSString *, NSDictionary *, NSString *))dlsym(RTLD_DEFAULT, "SGNowPlayingSetExtras");
     if (!setExtras) {
         AULog(@"lock screen: Taurus's now playing extras are missing");
@@ -512,6 +527,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
         }
         BOOL moving = mode == 0;
         CGSize size = clipSize();
+        __weak AULockScreen *weakSelf = self;
         // One offer per track: what it holds is fixed once it is first asked for, and shared by both requests.
         __block AULockMaterial *material = nil;
         __block NSURL *file = nil;
@@ -523,6 +539,14 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
                 AULog(@"lock screen: no artwork for %@ in time", uri);
                 return;
             }
+            if (material.partial) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    AULockScreen *me = weakSelf;
+                    if (!me) return;
+                    me->_partialFor = uri;
+                    [me trackChanged];   // the scene may have come meanwhile
+                });
+            }
             CGImageRef first = AULockClipFrame(material.scene, size, 0, material.moving);
             if (first) {
                 poster = [UIImage imageWithCGImage:first];
@@ -531,7 +555,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
             NSString *name = [NSString stringWithFormat:@"%@-%.0fx%.0f.mp4", AUSHA1(material.signature), size.width, size.height];
             file = [clipFolder() URLByAppendingPathComponent:name];
         };
-        NSString *artworkID = [NSString stringWithFormat:@"aura-%@-%ld-v8", AUSHA1(uri), (long)mode];
+        NSString *artworkID = [NSString stringWithFormat:@"aura-%@-%ld-v9-%lu", AUSHA1(uri), (long)mode, (unsigned long)_offers];
         MPMediaItemAnimatedArtwork *artwork = [[artworkClass alloc] initWithArtworkID:artworkID
             previewImageRequestHandler:^(CGSize wanted, void (^completion)(UIImage *)) {
                 dispatch_async(clipQueue(), ^{

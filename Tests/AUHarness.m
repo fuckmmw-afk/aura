@@ -59,7 +59,7 @@ static CGImageRef sceneFrame(AUScene *scene, CGPoint tilt, CGSize size) {
         CGContextDrawImage(o, CGRectMake(0, 0, side, side), layer.image.CGImage);
         AUSceneSource object = {CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), side, side,
                                 CGRectMake(0, 0, side, side), YES, layer.depth, NO,
-                                AUSceneAlphaBox(CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), side)};
+                                AUSceneAlphaBox(CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), side), layer.relief};
         AUSceneDraw3D(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), w, h, square, scene, camera, object);
         CGContextRelease(o);
     }
@@ -92,7 +92,7 @@ static CGImageRef fillFrame(AUScene *scene, CGPoint tilt, CGSize size) {
         CGContextDrawImage(o, CGRectMake(0, 0, side, side), layer.image.CGImage);
         AUSceneSource object = {CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), side, side,
                                 CGRectMake(0, 0, side, side), YES, layer.depth, NO,
-                                AUSceneAlphaBox(CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), side)};
+                                AUSceneAlphaBox(CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), side), layer.relief};
         AUSceneDraw3D(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), w, h, square, scene, camera, object);
         CGContextRelease(o);
     }

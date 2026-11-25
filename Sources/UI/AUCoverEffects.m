@@ -793,7 +793,8 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
         [_motion startDeviceMotionUpdatesToQueue:_motionQueue withHandler:^(CMDeviceMotion *motion, NSError *error) {
             if (!motion) return;
             double gx = motion.gravity.x, gy = motion.gravity.y;
-            BOOL moved = !first && hypot(gx - lastX, gy - lastY) > 0.004;
+            // A phone held in the hand never stands still: only a real turn wakes the drawing.
+            BOOL moved = !first && hypot(gx - lastX, gy - lastY) > AUTune(@"wake");
             first = NO;
             lastX = gx;
             lastY = gy;
@@ -812,8 +813,11 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     if (_link || !_motionOn) return;
     _motion.deviceMotionUpdateInterval = 1.0 / 100;
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
-    if (@available(iOS 15.0, *)) _link.preferredFrameRateRange = CAFrameRateRangeMake(80, 120, 120);
-    else _link.preferredFramesPerSecond = 120;
+    // The whole scene is drawn again each frame: 60 at most (the heat of 120 is not worth it), 30 when the phone is hot.
+    float fps = (float)AUTune(@"appFps");
+    if (NSProcessInfo.processInfo.thermalState >= NSProcessInfoThermalStateSerious) fps = MIN(fps, 30);
+    if (@available(iOS 15.0, *)) _link.preferredFrameRateRange = CAFrameRateRangeMake(MIN(fps, 30), fps, fps);
+    else _link.preferredFramesPerSecond = (NSInteger)fps;
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
 
@@ -866,7 +870,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
             if (++_frames % 600 == 1) AULog(@"parallax running: tilt %.2f %.2f", _tiltNow.x, _tiltNow.y);
         }
     }
-    if (now - _lastMove > 0.8) [self stopLink];
+    if (now - _lastMove > 0.6) [self stopLink];
 }
 
 - (void)becameActive {
