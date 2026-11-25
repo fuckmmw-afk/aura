@@ -2,6 +2,7 @@
 #import "Core/AUCore.h"
 #import "Core/AUTaurus.h"
 #import "Features/AUPipeline.h"
+#import "UI/AUParallaxRenderer.h"
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
@@ -10,8 +11,6 @@
 static const CGFloat kCoverMinWidth = 200;
 static const CGFloat kStepOut = 1.06;            // the objects' scale over the cover, from its foot (the cover only)
 static const CGFloat kMaxTilt = 0.15;            // gravity change (≈ radians) for a full tilt
-static const CGFloat kStrength = 0.07;           // a full tilt moves the nearest object kStrength * side against the background
-static const CGFloat kBackgroundShare = 0.35;    // the background's own move, against the tilt, as a share of that
 
 typedef NS_ENUM(NSInteger, AUSurfaceKind) {
     AUSurfaceCover,
@@ -23,6 +22,7 @@ typedef NS_ENUM(NSInteger, AUSurfaceKind) {
 @property (nonatomic) AUSurfaceKind kind;
 @property (nonatomic, strong) CALayer *stage;                 // clipped to the cover or the fill
 @property (nonatomic, strong) CALayer *background;
+@property (nonatomic, strong, nullable) AUParallaxRenderer *renderer;   // the background bent by its depth, over `background`
 @property (nonatomic, strong) CALayer *objects;               // the objects' host: unclipped over the cover, clipped and faded in Fill
 @property (nonatomic, strong) CAGradientLayer *objectsMask;
 @property (nonatomic, strong) NSMutableArray<CALayer *> *layers;
@@ -279,15 +279,15 @@ static UIView *taurusField(void) {
 #pragma mark - geometry
 
 static CGFloat strengthNow(void) {
-    return kStrength * AUNumber(AUKeyDepthStrength, 1.0);
+    return AUSceneMotion * AUNumber(AUKeyDepthStrength, 1.0);
 }
 
-// The picture (the cover's square, or Fill's 3:4 canvas) aspect-filled into `bounds`, zoomed just enough that the
-// background's own move never shows its edge.
-static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving) {
+// The picture (the cover's square) aspect-filled into `bounds`, zoomed just enough that the background's own move
+// (`reach`: its largest factor) never shows its edge.
+static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double reach) {
     if (picture.width <= 0 || picture.height <= 0) return bounds;
     CGFloat scale = MAX(bounds.size.width / picture.width, bounds.size.height / picture.height);
-    if (moving) scale *= 1 + 2.2 * kBackgroundShare * strengthNow();
+    if (moving) scale *= 1 + 2 * reach * strengthNow() + 0.006;
     CGSize size = CGSizeMake(picture.width * scale, picture.height * scale);
     return CGRectMake(CGRectGetMidX(bounds) - size.width / 2, CGRectGetMidY(bounds) - size.height / 2, size.width, size.height);
 }
@@ -299,11 +299,16 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving) {
 }
 
 - (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {
-    surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, [self pictureSizeFor:surface], _shownMoving);
+    double reach = surface.content ? surface.content.plateReach : 0.3;
+    surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, [self pictureSizeFor:surface], _shownMoving, reach);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     surface.background.bounds = (CGRect){CGPointZero, surface.pictureRect.size};
     surface.background.position = CGPointMake(CGRectGetMidX(surface.pictureRect), CGRectGetMidY(surface.pictureRect));
+    if (surface.renderer) {
+        surface.renderer.layer.frame = surface.background.bounds;
+        [surface.renderer layoutForScale:UIScreen.mainScreen.scale];
+    }
     [CATransaction commit];
     [self moveSurfaces];
 }
@@ -408,7 +413,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving) {
 
 #pragma mark - moving
 
-// The background slides a little against the tilt; each object, whole, with it by its depth. Nothing is bent.
+// Everything by its depth: the background bends by its smooth depth (Metal), every object moves whole by its own.
 - (void)moveSurfaces {
     CGFloat strength = _shownMoving ? strengthNow() : 0;
     [CATransaction begin];
@@ -417,8 +422,16 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving) {
         AUScene *scene = surface.content;
         CGRect picture = surface.pictureRect;
         CGFloat side = MIN(picture.size.width, picture.size.height);
-        CGFloat back = -kBackgroundShare * strength * side;
-        surface.background.affineTransform = CGAffineTransformMakeTranslation(_tiltNow.x * back, _tiltNow.y * back);
+        if (surface.renderer) {
+            surface.background.affineTransform = CGAffineTransformIdentity;
+            surface.renderer.tilt = _tiltNow;
+            surface.renderer.reach = strength;
+            if (_active && scene) [surface.renderer render];
+        } else {
+            // No GPU: the background slides whole, as the rule moves its typical (a little far) depth.
+            CGFloat back = scene ? [scene plateFactorOf:scene.plateCenter - 0.15] * strength * side : 0;
+            surface.background.affineTransform = CGAffineTransformMakeTranslation(_tiltNow.x * back, _tiltNow.y * back);
+        }
         CGRect objectsRect = picture;
         CGAffineTransform base = CGAffineTransformIdentity;
         if (surface.kind == AUSurfaceCover && _cover && surface.objects.superlayer == _plane.layer) {
@@ -516,6 +529,19 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving) {
     BOOL cover = surface.kind == AUSurfaceCover;
     UIImage *background = cover ? [scene squareOf:scene.background] : scene.background;
     surface.background.contents = (__bridge id)background.CGImage;
+    if ([AUParallaxRenderer supported] && background.CGImage) {
+        if (!surface.renderer) {
+            surface.renderer = [AUParallaxRenderer new];
+            surface.renderer.presentsWithTransaction = YES;
+            [surface.background addSublayer:surface.renderer.layer];
+        }
+        UIImage *plate = cover ? scene.plateSquare : scene.plateDepth;
+        [surface.renderer setColor:background.CGImage depth:plate.CGImage];
+        surface.renderer.center = scene.plateCenter;
+        surface.renderer.limit = scene.plateLimit;
+        surface.renderer.layer.frame = surface.background.bounds;
+        [surface.renderer layoutForScale:UIScreen.mainScreen.scale];
+    }
     for (CALayer *layer in surface.layers) [layer removeFromSuperlayer];
     [surface.layers removeAllObjects];
     if (objects) {

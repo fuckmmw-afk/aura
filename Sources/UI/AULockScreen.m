@@ -13,16 +13,20 @@
 #endif
 
 static const int32_t kFPS = 30, kLoopSeconds = 6;
-static const double kStrength = 0.07, kBackgroundShare = 0.35;
 
 #pragma mark - the clip, on the CPU
 //
 // The clip is made when the lock screen asks for it, and Spotify is then in the background, where iOS lets no app
-// use the GPU. It needs none: the scene's layers are scaled to the frame once, and each frame is the background and
-// the objects drawn at their offsets as the camera circles, plus a shade at the foot for the lock screen's controls.
+// use the GPU. It needs none: the scene's layers are scaled to the frame once, and each frame is the background bent
+// by its depth (AUSceneWarp, all cores) and the objects drawn at their offsets as the camera circles, plus a shade at
+// the foot for the lock screen's controls.
 
 typedef struct {
-    CGImageRef background;        // drawn at the picture's size
+    CGContextRef base;            // the background (fill + square), the frame's size and a margin all round
+    CGImageRef background;        // the same, as a picture, for the still clip
+    float *factors;               // per frame pixel, the background's factor (AUScenePlateFactors)
+    size_t margin;
+    double motion;                // the largest move at factor 1, pixels
     CGImageRef objects[8];
     double weights[8];
     int count;
@@ -104,13 +108,16 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     l.moving = moving && scene.layers.count;
     // The square across the frame's width (zoomed a touch for the moves), a little above the middle, the blurred
     // cover filling the rest.
-    double zoom = l.moving ? 1 + 2.2 * kBackgroundShare * kStrength : 1.0;
+    double strength = AUSceneMotion * AUNumber(AUKeyDepthStrength, 1.0);
+    double zoom = l.moving ? 1 + 2 * scene.plateReach * strength + 0.006 : 1.0;
     double side = size.width * zoom;
     l.side = side;
+    l.motion = strength * side;
     double top = (size.height - side) * 0.42;
     l.picture = CGRectMake((size.width - side) / 2, size.height - top - side, side, side);
     // The background as one image the frame's size, with margin for its own move: fill, then the square faded in.
-    double margin = ceil(kBackgroundShare * kStrength * side) + 2;
+    size_t margin = l.moving ? (size_t)ceil(scene.plateReach * l.motion) + 2 : 0;
+    l.margin = margin;
     CGSize baseSize = CGSizeMake(size.width + 2 * margin, size.height + 2 * margin);
     CGContextRef base = bgraContext((size_t)baseSize.width, (size_t)baseSize.height, NULL, 0);
     CGImageRef fill = blurredFill(scene.background.CGImage, baseSize);
@@ -127,8 +134,12 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     CGContextRestoreGState(base);
     CGImageRelease(fade);
     l.background = CGBitmapContextCreateImage(base);
-    CGContextRelease(base);
-    l.backgroundRect = CGRectMake(-margin, -margin, baseSize.width, baseSize.height);
+    l.base = base;
+    l.backgroundRect = CGRectMake(-(double)margin, -(double)margin, baseSize.width, baseSize.height);
+    if (l.moving) {
+        CGRect canvas = CGRectMake(l.picture.origin.x, top, side, side);
+        l.factors = AUScenePlateFactors(scene, (size_t)size.width, (size_t)size.height, canvas, side * 0.12);
+    }
     for (AUSceneLayer *object in scene.layers) {
         if (l.count >= 8) break;
         l.objects[l.count] = scaled(object.image.CGImage, CGSizeMake(side, side));
@@ -150,6 +161,8 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
 
 static void freeLayers(AUClipLayers *l) {
     if (l->background) CGImageRelease(l->background);
+    if (l->base) CGContextRelease(l->base);
+    free(l->factors);
     for (int i = 0; i < l->count; i++) if (l->objects[i]) CGImageRelease(l->objects[i]);
     if (l->shade) CGImageRelease(l->shade);
     memset(l, 0, sizeof(*l));
@@ -159,12 +172,20 @@ static void freeLayers(AUClipLayers *l) {
 static void drawFrame(CGContextRef context, AUClipLayers *l, double phase) {
     CGPoint tilt = l->moving ? tiltAt(phase) : CGPointZero;
     CGContextSetInterpolationQuality(context, kCGInterpolationLow);
-    CGContextSetBlendMode(context, kCGBlendModeCopy);
-    double back = -kBackgroundShare * kStrength * l->side;
-    CGContextDrawImage(context, CGRectOffset(l->backgroundRect, tilt.x * back, -tilt.y * back), l->background);
+    uint8_t *frame = CGBitmapContextGetData(context);
+    if (l->moving && l->factors && frame && CGBitmapContextGetWidth(context) == (size_t)l->size.width
+        && CGBitmapContextGetHeight(context) == (size_t)l->size.height) {
+        // The bitmap's rows run top down, as the app's y: the tilt goes in as it is.
+        AUSceneWarp(frame, CGBitmapContextGetBytesPerRow(context), (size_t)l->size.width, (size_t)l->size.height,
+                    CGBitmapContextGetData(l->base), CGBitmapContextGetBytesPerRow(l->base), l->margin, l->factors,
+                    CGPointMake(tilt.x * l->motion, tilt.y * l->motion));
+    } else {
+        CGContextSetBlendMode(context, kCGBlendModeCopy);
+        CGContextDrawImage(context, l->backgroundRect, l->background);
+    }
     CGContextSetBlendMode(context, kCGBlendModeNormal);
     for (int i = 0; i < l->count; i++) {
-        double amount = l->weights[i] * kStrength * l->side;
+        double amount = l->weights[i] * l->motion;
         CGContextDrawImage(context, CGRectOffset(l->picture, tilt.x * amount, -tilt.y * amount), l->objects[i]);
     }
     CGContextDrawImage(context, CGRectMake(0, 0, l->size.width, l->size.height), l->shade);

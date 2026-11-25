@@ -536,12 +536,12 @@ static NSArray<NSData *> *objectMasks(CGImageRef image, BOOL peopleOnly, size_t 
     NSMutableArray *kept = [NSMutableArray array];
     for (NSData *mask in taken) {
         double area = areaOf(mask.bytes, n);
-        if (area >= 0.03 && area <= 0.8) [kept addObject:@[@(area), mask]];
+        if (area >= 0.01 && area <= 0.8) [kept addObject:@[@(area), mask]];
     }
     [kept sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) { return [b[0] compare:a[0]]; }];
     NSMutableArray<NSData *> *result = [NSMutableArray array];
     for (NSArray *entry in kept) {
-        if (result.count < 2) [result addObject:entry[1]];
+        if (result.count < 6) [result addObject:entry[1]];
     }
     return result;
 }
@@ -677,6 +677,47 @@ static CGImageRef lamaFill(MLModel *model, CGImageRef cover, const uint8_t *hole
     return rgba8(filled, filled.extent);
 }
 
+// The background's depth: where the objects were, the depth around them carried in (normalized convolution at 128
+// px), then softened, so the plate bends smoothly and has no object edge left to tear along.
+static CGImageRef plateDepthOf(const uint8_t *depth, const uint8_t *holes, size_t side) {
+    enum { kSmall = 128 };
+    const size_t n = kSmall * kSmall;
+    uint8_t *d = calloc(n, 1), *h = calloc(n, 1), *num = calloc(n, 1), *den = calloc(n, 1), *a = calloc(n, 1), *b = calloc(n, 1);
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    CGImageRef depthImage = AUGrayImage(depth, side, side), holesImage = AUGrayImage(holes, side, side);
+    CGContextRef dc = CGBitmapContextCreate(d, kSmall, kSmall, 8, kSmall, gray, (CGBitmapInfo)kCGImageAlphaNone);
+    CGContextSetInterpolationQuality(dc, kCGInterpolationHigh);
+    CGContextDrawImage(dc, CGRectMake(0, 0, kSmall, kSmall), depthImage);
+    CGContextRelease(dc);
+    CGContextRef hc = CGBitmapContextCreate(h, kSmall, kSmall, 8, kSmall, gray, (CGBitmapInfo)kCGImageAlphaNone);
+    CGContextDrawImage(hc, CGRectMake(0, 0, kSmall, kSmall), holesImage);
+    CGContextRelease(hc);
+    CGColorSpaceRelease(gray);
+    CGImageRelease(depthImage);
+    CGImageRelease(holesImage);
+    for (size_t i = 0; i < n; i++) {
+        uint8_t keep = 255 - h[i];
+        num[i] = (uint8_t)((d[i] * keep + 127) / 255);
+        den[i] = keep;
+    }
+    vImage_Buffer nb = {num, kSmall, kSmall, kSmall}, db = {den, kSmall, kSmall, kSmall}, ab = {a, kSmall, kSmall, kSmall}, bb = {b, kSmall, kSmall, kSmall};
+    for (int pass = 0; pass < 2; pass++) {
+        vImageTentConvolve_Planar8(&nb, &ab, NULL, 0, 0, 31, 31, 0, kvImageEdgeExtend);
+        vImageTentConvolve_Planar8(&ab, &nb, NULL, 0, 0, 31, 31, 0, kvImageEdgeExtend);
+        vImageTentConvolve_Planar8(&db, &bb, NULL, 0, 0, 31, 31, 0, kvImageEdgeExtend);
+        vImageTentConvolve_Planar8(&bb, &db, NULL, 0, 0, 31, 31, 0, kvImageEdgeExtend);
+    }
+    for (size_t i = 0; i < n; i++) {
+        double filled = den[i] > 2 ? MIN(255.0, 255.0 * num[i] / den[i]) : d[i];
+        double keep = (255 - h[i]) / 255.0;
+        a[i] = (uint8_t)lround(d[i] * keep + filled * (1 - keep));
+    }
+    vImageTentConvolve_Planar8(&ab, &bb, NULL, 0, 0, 9, 9, 0, kvImageEdgeExtend);
+    CGImageRef small = AUGrayImage(b, kSmall, kSmall);
+    free(d); free(h); free(num); free(den); free(a); free(b);
+    return small;
+}
+
 AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSString **log) {
     if (!cover) return nil;
     double started = AUNowMs();
@@ -790,6 +831,13 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     CGColorSpaceRelease(rgb);
     [layers sortUsingComparator:^NSComparisonResult(AUSceneLayer *a, AUSceneLayer *b) { return [@(a.depth) compare:@(b.depth)]; }];
     AUScene *scene = [AUScene new];
+    if (depthMap) {
+        CGImageRef plate = plateDepthOf(depthMap.bytes, g, side);
+        if (plate) {
+            scene.plateDepth = [UIImage imageWithCGImage:plate];
+            CGImageRelease(plate);
+        }
+    }
     scene.background = [UIImage imageWithCGImage:background];
     CGImageRelease(background);
     CGImageRelease(square);

@@ -9,6 +9,7 @@
 #import "Features/AUVision.h"
 #import "Features/AUScene.h"
 #import "UI/AULockScreen.h"
+#import "UI/AUParallaxRenderer.h"
 #import <AVFoundation/AVFoundation.h>
 
 static NSString *outDir;
@@ -35,34 +36,29 @@ static BOOL waitForModel(NSString *modelID) {
     return NO;
 }
 
-// The cover view's look: the scene's square, the objects over it moved by the tilt (no step-out, no shadow).
-static CGImageRef squareFrame(AUScene *scene, CGPoint tilt, size_t side) {
-    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    CGContextRef c = CGBitmapContextCreate(NULL, side, side, 8, 0, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    CGColorSpaceRelease(space);
-    double zoom = 1 + 2.2 * 0.35 * 0.07, drawn = side * zoom, off = (side - drawn) / 2, s = 0.07 * drawn;
-    CGImageRef back = [scene squareOf:scene.background].CGImage;
-    CGContextDrawImage(c, CGRectMake(off - tilt.x * 0.35 * s, off + tilt.y * 0.35 * s, drawn, drawn), back);
-    for (AUSceneLayer *layer in scene.layers) {
-        double w = [scene weightOf:layer] * s;
-        CGContextDrawImage(c, CGRectMake(off + tilt.x * w, off - tilt.y * w, drawn, drawn), [scene squareOf:layer.image].CGImage);
-    }
-    CGImageRef out = CGBitmapContextCreateImage(c);
-    CGContextRelease(c);
-    return out;
-}
-
-// Fill's look: the square aspect-filled into 402 x 546 as Taurus fills it, the objects over it by the tilt.
-static CGImageRef fillFrame(AUScene *scene, CGPoint tilt, CGSize size) {
-    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    CGContextRef c = CGBitmapContextCreate(NULL, (size_t)size.width, (size_t)size.height, 8, 0, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    CGColorSpaceRelease(space);
-    double zoom = 1 + 2.2 * 0.35 * 0.07, drawn = MAX(size.width, size.height) * zoom, s = 0.07 * drawn;
+// The app's look, on the CPU as the shader draws it: the canvas aspect-filled into `size`, zoomed for the moves, the
+// background bent by its depth (AUSceneWarp, the lock clip's warp) and every object moved whole by its own depth.
+static CGImageRef sceneFrame(AUScene *scene, CGPoint tilt, CGSize size) {
+    size_t w = (size_t)size.width, h = (size_t)size.height;
+    double reach = scene.plateReach, zoom = 1 + 2 * reach * AUSceneMotion + 0.006;
+    double drawn = MAX(size.width, size.height) * zoom, motion = AUSceneMotion * drawn;
     double ox = (size.width - drawn) / 2, oy = (size.height - drawn) / 2;
-    CGContextDrawImage(c, CGRectMake(ox - tilt.x * 0.35 * s, oy + tilt.y * 0.35 * s, drawn, drawn), scene.background.CGImage);
+    size_t margin = (size_t)ceil(reach * motion) + 2;
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGBitmapInfo info = kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big;
+    CGContextRef base = CGBitmapContextCreate(NULL, w + 2 * margin, h + 2 * margin, 8, 0, space, info);
+    CGContextRef c = CGBitmapContextCreate(NULL, w, h, 8, 0, space, info);
+    CGColorSpaceRelease(space);
+    CGContextSetInterpolationQuality(base, kCGInterpolationHigh);
+    CGContextDrawImage(base, CGRectMake(ox + margin, oy + margin, drawn, drawn), scene.background.CGImage);
+    float *factors = AUScenePlateFactors(scene, w, h, CGRectMake(ox, oy, drawn, drawn), 0);
+    AUSceneWarp(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), w, h, CGBitmapContextGetData(base),
+                CGBitmapContextGetBytesPerRow(base), margin, factors, CGPointMake(tilt.x * motion, tilt.y * motion));
+    free(factors);
+    CGContextRelease(base);
     for (AUSceneLayer *layer in scene.layers) {
-        double w = [scene weightOf:layer] * s;
-        CGContextDrawImage(c, CGRectMake(ox + tilt.x * w, oy - tilt.y * w, drawn, drawn), layer.image.CGImage);
+        double m = [scene weightOf:layer] * motion;
+        CGContextDrawImage(c, CGRectMake(ox + tilt.x * m, oy - tilt.y * m, drawn, drawn), layer.image.CGImage);
     }
     CGImageRef out = CGBitmapContextCreateImage(c);
     CGContextRelease(c);
@@ -97,6 +93,7 @@ int main(int argc, const char *argv[]) {
             printf("  %s (%.0f ms in all)\n", log.UTF8String ?: "no scene", sceneMs);
             if (!scene || !scene.inpainted) failures++;
             save(scene.background.CGImage, [name stringByAppendingString:@"-2-background.png"]);
+            save(scene.plateDepth.CGImage, [name stringByAppendingString:@"-2-plate-depth.png"]);
             for (NSUInteger i = 0; i < scene.layers.count; i++) {
                 save(scene.layers[i].image.CGImage, [NSString stringWithFormat:@"%@-3-layer%lu.png", name, (unsigned long)i]);
             }
@@ -106,10 +103,25 @@ int main(int argc, const char *argv[]) {
                     CGImageRef lock = AULockClipFrame(scene, CGSizeMake(896, 1200), i ? 0.125 : 0.625, YES);
                     save(lock, [NSString stringWithFormat:@"%@-8-lock-%d.png", name, i]);
                     if (lock) CGImageRelease(lock);
-                    CGImageRef square = squareFrame(scene, tilt, 600);
+                    CGImageRef square = sceneFrame(scene, tilt, CGSizeMake(600, 600));
                     save(square, [NSString stringWithFormat:@"%@-4-cover-%d.png", name, i]);
                     if (square) CGImageRelease(square);
-                    CGImageRef fill = fillFrame(scene, tilt, CGSizeMake(402, 546));
+                    // The app's own shader (the background alone), to see it compiles and bends as the CPU copy does.
+                    if ([AUParallaxRenderer supported]) {
+                        AUParallaxRenderer *renderer = [AUParallaxRenderer new];
+                        [renderer setColor:scene.background.CGImage depth:scene.plateDepth.CGImage];
+                        renderer.center = scene.plateCenter;
+                        renderer.limit = scene.plateLimit;
+                        renderer.reach = AUSceneMotion;
+                        renderer.zoom = 1 + 2 * scene.plateReach * AUSceneMotion + 0.006;
+                        renderer.tilt = tilt;
+                        CGImageRef gpu = [renderer renderImageWidth:600 height:600];
+                        save(gpu, [NSString stringWithFormat:@"%@-4-cover-gpu-background-%d.png", name, i]);
+                        if (gpu) CGImageRelease(gpu);
+                    } else if (i == 0) {
+                        printf("  no Metal device\n");
+                    }
+                    CGImageRef fill = sceneFrame(scene, tilt, CGSizeMake(402, 546));
                     save(fill, [NSString stringWithFormat:@"%@-5-fill-%d.png", name, i]);
                     if (fill) CGImageRelease(fill);
                 }
