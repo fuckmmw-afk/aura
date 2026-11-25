@@ -2,7 +2,8 @@
 #import "Core/AUCore.h"
 #import "Core/AUTaurus.h"
 #import "Features/AUPipeline.h"
-#import "UI/AUParallaxRenderer.h"
+#import "Features/AUScene3D.h"
+#import "UI/AUSceneRenderer.h"
 #import <Accelerate/Accelerate.h>
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
@@ -23,9 +24,9 @@ typedef NS_ENUM(NSInteger, AUSurfaceKind) {
 @property (nonatomic) AUSurfaceKind kind;
 @property (nonatomic, strong) CALayer *stage;                 // clipped to the cover or the fill
 @property (nonatomic, strong) CALayer *background;
-@property (nonatomic, strong, nullable) AUParallaxRenderer *renderer;   // the background bent by its depth, over `background`
-@property (nonatomic, strong, nullable) CALayer *soft;                   // Fill: a lightly blurred copy, faded in toward the foot
-@property (nonatomic, strong, nullable) CAGradientLayer *softMask;
+@property (nonatomic, strong, nullable) AUSceneRenderer *renderer;      // the whole scene in 3D (Metal), over `background`
+@property (nonatomic, strong, nullable) NSArray<CALayer *> *softs;       // Fill: blurred copies, each faded in further down
+@property (nonatomic, strong, nullable) NSArray<CAGradientLayer *> *softMasks;
 @property (nonatomic, strong) CALayer *objects;               // the objects' host: unclipped over the cover, clipped and faded in Fill
 @property (nonatomic, strong) CAGradientLayer *objectsMask;
 @property (nonatomic, strong) NSMutableArray<CALayer *> *layers;
@@ -78,9 +79,12 @@ static CALayer *plainLayer(void) {
     return layer;
 }
 
-// Where Fill's picture runs into the player's controls: sharp to 0.58 of the stage, a light blur over it by 0.86, and
-// the whole faded out from 0.64 to its foot — longer and gentler than Taurus's own bands (0.74...0.985).
-static const CGFloat kSoftFrom = 0.58, kSoftTo = 0.86, kFadeFrom = 0.64;
+// Where Fill's picture runs into the player's controls: sharp down to 0.46 of the stage, then a light blur coming in
+// by 0.70, a softer one from 0.60 to 0.92, and the whole faded out from 0.66 to its foot — a long, gentle run instead of
+// Taurus's own bands (0.74...0.985).
+static const CGFloat kSoftRamps[2][2] = {{0.46, 0.70}, {0.60, 0.92}};
+static const size_t kSoftSides[2] = {200, 120};
+static const CGFloat kFadeFrom = 0.66;
 
 static CAGradientLayer *ramp(CGFloat from, CGFloat to, BOOL rising) {
     NSMutableArray *locations = [NSMutableArray array], *colors = [NSMutableArray array];
@@ -102,16 +106,17 @@ static CAGradientLayer *ramp(CGFloat from, CGFloat to, BOOL rising) {
     return layer;
 }
 
-// The picture blurred by a few percent of its side (a small copy convolved): Fill's soft foot.
-static CGImageRef lightlyBlurred(CGImageRef image) {
+// The scene as it rests (background and objects) blurred by a few percent of its side: a small copy convolved.
+static CGImageRef blurredScene(AUScene *scene, size_t side) {
+    CGImageRef image = scene.background.CGImage;
     if (!image) return NULL;
-    size_t side = 160;
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGContextRef c = CGBitmapContextCreate(NULL, side, side, 8, 0, space, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
     CGColorSpaceRelease(space);
     if (!c) return NULL;
     CGContextSetInterpolationQuality(c, kCGInterpolationHigh);
     CGContextDrawImage(c, CGRectMake(0, 0, side, side), image);
+    for (AUSceneLayer *layer in scene.layers) CGContextDrawImage(c, CGRectMake(0, 0, side, side), layer.image.CGImage);
     vImage_Buffer a = {CGBitmapContextGetData(c), side, side, CGBitmapContextGetBytesPerRow(c)};
     NSMutableData *scratch = [NSMutableData dataWithLength:a.rowBytes * side];
     vImage_Buffer b = {scratch.mutableBytes, side, side, a.rowBytes};
@@ -302,10 +307,17 @@ static UIView *taurusField(void) {
         mask.locations = @[@0, @(kFadeFrom + 0.12), @1];
         surface.objects.mask = mask;
         surface.objectsMask = mask;
-        surface.soft = plainLayer();
-        surface.softMask = ramp(0, 1, YES);
-        surface.soft.mask = surface.softMask;
-        [surface.stage addSublayer:surface.soft];
+        NSMutableArray *softs = [NSMutableArray array], *masks = [NSMutableArray array];
+        for (int i = 0; i < 2; i++) {
+            CALayer *soft = plainLayer();
+            CAGradientLayer *softMask = ramp(0, 1, YES);
+            soft.mask = softMask;
+            [surface.stage addSublayer:soft];
+            [softs addObject:soft];
+            [masks addObject:softMask];
+        }
+        surface.softs = softs;
+        surface.softMasks = masks;
     }
     return surface;
 }
@@ -336,10 +348,10 @@ static CGFloat strengthNow(void) {
 
 // The picture (the cover's square) aspect-filled into `bounds`, zoomed just enough that the background's own move
 // (`reach`: its largest factor) never shows its edge.
-static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double reach) {
+static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double reach, BOOL threeD) {
     if (picture.width <= 0 || picture.height <= 0) return bounds;
     CGFloat scale = MAX(bounds.size.width / picture.width, bounds.size.height / picture.height);
-    if (moving) scale *= 1 + 2 * reach * strengthNow() + 0.006;
+    if (moving) scale *= threeD ? AUSceneZoom(AUNumber(AUKeyDepthStrength, 1.0)) : 1 + 2 * reach * strengthNow() + 0.006;
     CGSize size = CGSizeMake(picture.width * scale, picture.height * scale);
     return CGRectMake(CGRectGetMidX(bounds) - size.width / 2, CGRectGetMidY(bounds) - size.height / 2, size.width, size.height);
 }
@@ -352,25 +364,27 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
 
 - (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {
     double reach = surface.content ? surface.content.plateReach : 0.3;
-    surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, [self pictureSizeFor:surface], _shownMoving, reach);
+    surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, [self pictureSizeFor:surface], _shownMoving, reach,
+                                        surface.renderer != nil);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     surface.background.bounds = (CGRect){CGPointZero, surface.pictureRect.size};
     surface.background.position = CGPointMake(CGRectGetMidX(surface.pictureRect), CGRectGetMidY(surface.pictureRect));
-    if (surface.soft) {
-        surface.soft.bounds = surface.background.bounds;
-        surface.soft.position = surface.background.position;
-        surface.softMask.frame = surface.soft.bounds;
+    for (NSUInteger k = 0; k < surface.softs.count; k++) {
+        CALayer *soft = surface.softs[k];
+        soft.bounds = surface.background.bounds;
+        soft.position = surface.background.position;
+        surface.softMasks[k].frame = soft.bounds;
         // The ramp is the stage's: its share of the stage's height turned into the picture's.
         CGFloat h = MAX(1, surface.pictureRect.size.height), y = surface.pictureRect.origin.y, H = bounds.size.height;
-        CGFloat from = (kSoftFrom * H - y) / h, to = (kSoftTo * H - y) / h;
+        CGFloat from = (kSoftRamps[k][0] * H - y) / h, to = (kSoftRamps[k][1] * H - y) / h;
         NSMutableArray *locations = [NSMutableArray array];
         NSArray *base = ramp(0, 1, YES).locations;
         for (NSUInteger i = 0; i < base.count; i++) {
             CGFloat t = i == 0 ? 0 : i == base.count - 1 ? 1 : from + (to - from) * [base[i] doubleValue];
             [locations addObject:@(MAX(0, MIN(1, t)))];
         }
-        surface.softMask.locations = locations;
+        surface.softMasks[k].locations = locations;
     }
     if (surface.renderer) {
         surface.renderer.layer.frame = surface.background.bounds;
@@ -518,14 +532,14 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
         if (surface.renderer) {
             surface.background.affineTransform = CGAffineTransformIdentity;
             surface.renderer.tilt = _tiltNow;
-            surface.renderer.reach = strength;
+            surface.renderer.strength = _shownMoving ? AUNumber(AUKeyDepthStrength, 1.0) : 0;
             if (_active && scene) [surface.renderer render];
         } else {
             // No GPU: the background slides whole, as the rule moves its typical (a little far) depth.
             CGFloat back = scene ? [scene plateFactorOf:scene.plateCenter - 0.15] * strength * side : 0;
             surface.background.affineTransform = CGAffineTransformMakeTranslation(_tiltNow.x * back, _tiltNow.y * back);
         }
-        surface.soft.affineTransform = surface.background.affineTransform;
+        for (CALayer *soft in surface.softs) soft.affineTransform = surface.background.affineTransform;
         CGRect objectsRect = picture;
         CGAffineTransform base = CGAffineTransformIdentity;
         if (surface.kind == AUSurfaceCover && _cover && surface.objects.superlayer == _plane.layer) {
@@ -624,27 +638,30 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     BOOL cover = surface.kind == AUSurfaceCover;
     UIImage *background = cover ? [scene squareOf:scene.background] : scene.background;
     surface.background.contents = (__bridge id)background.CGImage;
-    if (surface.soft) {
-        CGImageRef soft = lightlyBlurred(background.CGImage);
-        surface.soft.contents = (__bridge id)soft;
+    for (NSUInteger k = 0; k < surface.softs.count; k++) {
+        CGImageRef soft = blurredScene(scene, kSoftSides[k]);
+        surface.softs[k].contents = (__bridge id)soft;
         if (soft) CGImageRelease(soft);
     }
-    if ([AUParallaxRenderer supported] && background.CGImage) {
+    // The whole scene in 3D on Metal — unless the objects are to step out over the cover's frame (CA layers do that).
+    BOOL threeD = [AUSceneRenderer supported] && background.CGImage && !(cover && AUFlag(AUKeyPopOut));
+    if (threeD) {
         if (!surface.renderer) {
-            surface.renderer = [AUParallaxRenderer new];
+            surface.renderer = [AUSceneRenderer new];
             surface.renderer.presentsWithTransaction = YES;
             [surface.background addSublayer:surface.renderer.layer];
         }
-        UIImage *plate = cover ? scene.plateSquare : scene.plateDepth;
-        [surface.renderer setColor:background.CGImage depth:plate.CGImage];
-        surface.renderer.center = scene.plateCenter;
-        surface.renderer.limit = scene.plateLimit;
+        [surface.renderer setScene:scene];
+        surface.renderer.withObjects = objects;
         surface.renderer.layer.frame = surface.background.bounds;
         [surface.renderer layoutForScale:UIScreen.mainScreen.scale];
+    } else if (surface.renderer) {
+        [surface.renderer.layer removeFromSuperlayer];
+        surface.renderer = nil;
     }
     for (CALayer *layer in surface.layers) [layer removeFromSuperlayer];
     [surface.layers removeAllObjects];
-    if (objects) {
+    if (objects && !threeD) {
         for (AUSceneLayer *object in scene.layers) {
             CALayer *layer = plainLayer();
             UIImage *image = cover ? [scene squareOf:object.image] : object.image;
@@ -672,7 +689,8 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     if (artwork != [AUPipeline shared].current) return;
     AUScene *scene = artwork.scene;
     BOOL objects = [self wantsObjects] && scene.layers.count;
-    BOOL moving = [self wantsMotion] && objects;
+    // In 3D even a cover with no objects lifted moves: its background has its own relief.
+    BOOL moving = [self wantsMotion] && (objects || [AUSceneRenderer supported]);
     BOOL wantPlane = scene && ([self wantsObjects] || artwork.upscaled) && forCurrentTrack(artwork);
     BOOL sameCover = [artwork.key isEqualToString:_shownKey];
     if (!sameCover) {

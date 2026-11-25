@@ -1,7 +1,7 @@
 #import "AUScene.h"
 #import "AUImage.h"
 
-static NSString *const kVersion = @"scene-v2";
+static NSString *const kVersion = @"scene-v3";
 
 @implementation AUSceneLayer
 @end
@@ -15,6 +15,10 @@ static const double kPlateLimit = 0.6, kObjectLeast = 0.3;
     size_t _plateSide;
     double _plateReach;
     BOOL _plateRead;
+    double _plateLow;
+    NSData *_rawBytes;
+    size_t _rawSide;
+    BOOL _rawRead;
     UIImage *_plateSquare;
 }
 
@@ -36,10 +40,44 @@ static const double kPlateLimit = 0.6, kObjectLeast = 0.3;
     _plateSquare = nil;
 }
 
+static NSData *grayBytes(CGImageRef image, size_t *outSide) {
+    if (!image) return nil;
+    size_t side = MAX(CGImageGetWidth(image), CGImageGetHeight(image));
+    if (side < 2 || side > 1024) return nil;
+    NSMutableData *bytes = [NSMutableData dataWithLength:side * side];
+    CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+    CGContextRef c = CGBitmapContextCreate(bytes.mutableBytes, side, side, 8, side, gray, (CGBitmapInfo)kCGImageAlphaNone);
+    CGColorSpaceRelease(gray);
+    if (!c) return nil;
+    CGContextSetInterpolationQuality(c, kCGInterpolationHigh);
+    CGContextDrawImage(c, CGRectMake(0, 0, side, side), image);
+    CGContextRelease(c);
+    *outSide = side;
+    return bytes;
+}
+
+- (void)setRawDepth:(UIImage *)rawDepth {
+    _rawDepth = rawDepth;
+    _rawRead = NO;
+    _rawBytes = nil;
+}
+
+- (NSData *)rawBytes {
+    if (!_rawRead) {
+        _rawRead = YES;
+        _rawBytes = grayBytes(_rawDepth.CGImage, &_rawSide);
+    }
+    return _rawBytes;
+}
+
+- (size_t)rawSide { [self rawBytes]; return _rawSide; }
+- (double)plateLow { [self readPlate]; return _plateLow; }
+
 - (void)readPlate {
     if (_plateRead) return;
     _plateRead = YES;
     _plateReach = 0.3;
+    _plateLow = MAX(0.0, _backgroundDepth - 0.2);
     CGImageRef image = _plateDepth.CGImage;
     if (!image) return;
     size_t side = MAX(CGImageGetWidth(image), CGImageGetHeight(image));
@@ -54,7 +92,19 @@ static const double kPlateLimit = 0.6, kObjectLeast = 0.3;
     CGContextRelease(c);
     const uint8_t *p = bytes.bytes;
     double reach = 0;
-    for (size_t i = 0; i < side * side; i++) reach = MAX(reach, fabs([self plateFactorOf:p[i] / 255.0]));
+    size_t histogram[256] = {0};
+    for (size_t i = 0; i < side * side; i++) {
+        reach = MAX(reach, fabs([self plateFactorOf:p[i] / 255.0]));
+        histogram[p[i]]++;
+    }
+    size_t seen = 0;
+    for (int v = 0; v < 256; v++) {
+        seen += histogram[v];
+        if (seen >= side * side / 20) {
+            _plateLow = v / 255.0;
+            break;
+        }
+    }
     _plateBytes = bytes;
     _plateSide = side;
     _plateReach = reach;
@@ -158,6 +208,7 @@ void AUSceneWarp(uint8_t *frame, size_t frameRow, size_t w, size_t h, const uint
         [depths addObject:@(_layers[i].depth)];
     }
     if (_plateDepth.CGImage && ![AUPNGData(_plateDepth.CGImage) writeToFile:[folder stringByAppendingPathComponent:@"scene-depth.png"] atomically:YES]) return NO;
+    if (_rawDepth.CGImage && ![AUPNGData(_rawDepth.CGImage) writeToFile:[folder stringByAppendingPathComponent:@"scene-raw.png"] atomically:YES]) return NO;
     NSDictionary *plist = @{@"version": kVersion, @"square": @[@(_square.origin.x), @(_square.origin.y), @(_square.size.width), @(_square.size.height)],
                             @"depths": depths, @"backgroundDepth": @(_backgroundDepth), @"inpainted": @(_inpainted)};
     return [plist writeToFile:[folder stringByAppendingPathComponent:@"scene.plist"] atomically:YES];
@@ -174,6 +225,11 @@ void AUSceneWarp(uint8_t *frame, size_t frameRow, size_t w, size_t h, const uint
     AUScene *scene = [AUScene new];
     scene.background = [UIImage imageWithCGImage:background];
     CGImageRelease(background);
+    CGImageRef raw = AUImageFromData([NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"scene-raw.png"]]);
+    if (raw) {
+        scene.rawDepth = [UIImage imageWithCGImage:raw];
+        CGImageRelease(raw);
+    }
     CGImageRef plate = AUImageFromData([NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"scene-depth.png"]]);
     if (plate) {
         scene.plateDepth = [UIImage imageWithCGImage:plate];

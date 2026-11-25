@@ -969,6 +969,13 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     [layers sortUsingComparator:^NSComparisonResult(AUSceneLayer *a, AUSceneLayer *b) { return [@(a.depth) compare:@(b.depth)]; }];
     AUScene *scene = [AUScene new];
     if (depthMap) {
+        CGImageRef full = AUGrayImage(depthMap.bytes, side, side);
+        CGImageRef raw = full ? AUImageResized(full, 256, 256) : NULL;
+        if (raw) {
+            scene.rawDepth = [UIImage imageWithCGImage:raw];
+            CGImageRelease(raw);
+        }
+        if (full) CGImageRelease(full);
         CGImageRef plate = plateDepthOf(depthMap.bytes, g, side);
         if (plate) {
             scene.plateDepth = [UIImage imageWithCGImage:plate];

@@ -9,7 +9,8 @@
 #import "Features/AUVision.h"
 #import "Features/AUScene.h"
 #import "UI/AULockScreen.h"
-#import "UI/AUParallaxRenderer.h"
+#import "Features/AUScene3D.h"
+#import "UI/AUSceneRenderer.h"
 #import <AVFoundation/AVFoundation.h>
 
 static NSString *outDir;
@@ -36,30 +37,33 @@ static BOOL waitForModel(NSString *modelID) {
     return NO;
 }
 
-// The app's look, on the CPU as the shader draws it: the canvas aspect-filled into `size`, zoomed for the moves, the
-// background bent by its depth (AUSceneWarp, the lock clip's warp) and every object moved whole by its own depth.
+// The app's look, on the CPU as the shader draws it (AUScene3D): the square aspect-filled into `size`, zoomed for
+// the swing, the background and every object by its own relief, seen by the camera at `tilt`.
 static CGImageRef sceneFrame(AUScene *scene, CGPoint tilt, CGSize size) {
     size_t w = (size_t)size.width, h = (size_t)size.height;
-    double reach = scene.plateReach, zoom = 1 + 2 * reach * AUSceneMotion + 0.006;
-    double drawn = MAX(size.width, size.height) * zoom, motion = AUSceneMotion * drawn;
-    double ox = (size.width - drawn) / 2, oy = (size.height - drawn) / 2;
-    size_t margin = (size_t)ceil(reach * motion) + 2;
+    double drawn = MAX(size.width, size.height) * AUSceneZoom(1);
+    CGRect square = CGRectMake((size.width - drawn) / 2, (size.height - drawn) / 2, drawn, drawn);
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGBitmapInfo info = kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big;
-    CGContextRef base = CGBitmapContextCreate(NULL, w + 2 * margin, h + 2 * margin, 8, 0, space, info);
+    size_t side = CGImageGetWidth(scene.background.CGImage);
+    CGContextRef back = CGBitmapContextCreate(NULL, side, side, 8, 0, space, info);
     CGContextRef c = CGBitmapContextCreate(NULL, w, h, 8, 0, space, info);
-    CGColorSpaceRelease(space);
-    CGContextSetInterpolationQuality(base, kCGInterpolationHigh);
-    CGContextDrawImage(base, CGRectMake(ox + margin, oy + margin, drawn, drawn), scene.background.CGImage);
-    float *factors = AUScenePlateFactors(scene, w, h, CGRectMake(ox, oy, drawn, drawn), 0);
-    AUSceneWarp(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), w, h, CGBitmapContextGetData(base),
-                CGBitmapContextGetBytesPerRow(base), margin, factors, CGPointMake(tilt.x * motion, tilt.y * motion));
-    free(factors);
-    CGContextRelease(base);
+    CGContextDrawImage(back, CGRectMake(0, 0, side, side), scene.background.CGImage);
+    AUCamera camera = AUSceneCamera(scene, tilt, 1);
+    AUSceneSource source = {CGBitmapContextGetData(back), CGBitmapContextGetBytesPerRow(back), side, side,
+                            CGRectMake(0, 0, side, side), NO, 0, YES, CGRectNull};
+    AUSceneDraw3D(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), w, h, square, scene, camera, source);
+    CGContextRelease(back);
     for (AUSceneLayer *layer in scene.layers) {
-        double m = [scene weightOf:layer] * motion;
-        CGContextDrawImage(c, CGRectMake(ox + tilt.x * m, oy - tilt.y * m, drawn, drawn), layer.image.CGImage);
+        CGContextRef o = CGBitmapContextCreate(NULL, side, side, 8, 0, space, info);
+        CGContextDrawImage(o, CGRectMake(0, 0, side, side), layer.image.CGImage);
+        AUSceneSource object = {CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), side, side,
+                                CGRectMake(0, 0, side, side), YES, layer.depth, NO,
+                                AUSceneAlphaBox(CGBitmapContextGetData(o), CGBitmapContextGetBytesPerRow(o), side)};
+        AUSceneDraw3D(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), w, h, square, scene, camera, object);
+        CGContextRelease(o);
     }
+    CGColorSpaceRelease(space);
     CGImageRef out = CGBitmapContextCreateImage(c);
     CGContextRelease(c);
     return out;
@@ -106,17 +110,17 @@ int main(int argc, const char *argv[]) {
                     CGImageRef square = sceneFrame(scene, tilt, CGSizeMake(600, 600));
                     save(square, [NSString stringWithFormat:@"%@-4-cover-%d.png", name, i]);
                     if (square) CGImageRelease(square);
-                    // The app's own shader (the background alone), to see it compiles and bends as the CPU copy does.
-                    if ([AUParallaxRenderer supported]) {
-                        AUParallaxRenderer *renderer = [AUParallaxRenderer new];
-                        [renderer setColor:scene.background.CGImage depth:scene.plateDepth.CGImage];
-                        renderer.center = scene.plateCenter;
-                        renderer.limit = scene.plateLimit;
-                        renderer.reach = AUSceneMotion;
-                        renderer.zoom = 1 + 2 * scene.plateReach * AUSceneMotion + 0.006;
+                    // The app's own shader: the same scene on Metal, to see it compiles and agrees with the CPU copy.
+                    if ([AUSceneRenderer supported]) {
+                        AUSceneRenderer *renderer = [AUSceneRenderer new];
+                        [renderer setScene:scene];
+                        renderer.zoom = AUSceneZoom(1);
                         renderer.tilt = tilt;
-                        CGImageRef gpu = [renderer renderImageWidth:600 height:600];
-                        save(gpu, [NSString stringWithFormat:@"%@-4-cover-gpu-background-%d.png", name, i]);
+                        CGImageRef gpu = nil;
+                        for (int wait = 0; wait < 50 && !(gpu = [renderer renderImageWidth:600 height:600]); wait++) {
+                            [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+                        }
+                        save(gpu, [NSString stringWithFormat:@"%@-4-cover-gpu-%d.png", name, i]);
                         if (gpu) CGImageRelease(gpu);
                     } else if (i == 0) {
                         printf("  no Metal device\n");

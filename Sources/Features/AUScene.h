@@ -14,6 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface AUScene : NSObject
 @property (nonatomic, strong) UIImage *background;            // the cover with its objects painted out
 @property (nonatomic, strong, nullable) UIImage *plateDepth;  // the background's depth: smooth, the objects' room filled from around
+@property (nonatomic, strong, nullable) UIImage *rawDepth;    // the model's depth as it is (256 px): the objects' own relief
 @property (nonatomic) CGRect square;                          // where the cover sits in the canvas, pixels, origin top left
 @property (nonatomic, copy) NSArray<AUSceneLayer *> *layers;  // far to near
 @property (nonatomic) double backgroundDepth;
@@ -28,6 +29,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) double plateReach;            // the largest |factor| on the background: how far its edge moves
 @property (nonatomic, readonly, nullable) NSData *plateBytes; // plateDepth as 8-bit gray, plateSide x plateSide
 @property (nonatomic, readonly) size_t plateSide;
+@property (nonatomic, readonly) double plateLow;              // the background's far end (5th percentile of its depth)
+@property (nonatomic, readonly, nullable) NSData *rawBytes;   // rawDepth as 8-bit gray, rawSide x rawSide
+@property (nonatomic, readonly) size_t rawSide;
 // plateDepth cut to the cover's square, as squareOf: cuts the background.
 - (nullable UIImage *)plateSquare;
 // The canvas's square (the cover's own frame) cut out of the background and each layer, for the cover view.
