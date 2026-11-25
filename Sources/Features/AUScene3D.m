@@ -3,8 +3,8 @@
 static const double kMaxAngle = 0.20;        // radians at a full tilt, x1
 static const double kFocal = 1.8;
 static const double kDeep = 0.42;            // the background's far end lies this far behind the window
-static const double kRelief = 1.1;
-static const double kReliefBack = 0.04, kReliefFront = 0.08;
+static const double kRelief = 0.9;
+static const double kReliefBack = 0.03, kReliefFront = 0.08;
 
 AUCamera AUSceneCamera(AUScene *scene, CGPoint tilt, double strength) {
     AUCamera c;
