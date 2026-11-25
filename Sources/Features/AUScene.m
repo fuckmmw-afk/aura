@@ -1,5 +1,6 @@
 #import "AUScene.h"
 #import "AUImage.h"
+#import "Core/AUTune.h"
 
 static NSString *const kVersion = @"scene-v4";
 
@@ -145,13 +146,15 @@ static NSData *grayBytes(CGImageRef image, size_t *outSide) {
     if (_tall.CGImage && ![AUJPEGData(_tall.CGImage, 0.9) writeToFile:[folder stringByAppendingPathComponent:@"scene-tall.jpg"] atomically:YES]) return NO;
     if (_rawDepth.CGImage && ![AUPNGData(_rawDepth.CGImage) writeToFile:[folder stringByAppendingPathComponent:@"scene-raw.png"] atomically:YES]) return NO;
     NSDictionary *plist = @{@"version": kVersion, @"square": @[@(_square.origin.x), @(_square.origin.y), @(_square.size.width), @(_square.size.height)],
-                            @"depths": depths, @"backgroundDepth": @(_backgroundDepth), @"inpainted": @(_inpainted), @"segmented": @(_segmented), @"tallness": @(_tallness)};
+                            @"depths": depths, @"backgroundDepth": @(_backgroundDepth), @"inpainted": @(_inpainted), @"segmented": @(_segmented), @"tallness": @(_tallness), @"tune": _tune ?: @""};
     return [plist writeToFile:[folder stringByAppendingPathComponent:@"scene.plist"] atomically:YES];
 }
 
 + (instancetype)readFrom:(NSString *)folder {
     NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:[folder stringByAppendingPathComponent:@"scene.plist"]];
     if (![plist[@"version"] isEqual:kVersion]) return nil;
+    // Made with other numbers for the objects or the painting: made again.
+    if (![plist[@"tune"] isEqual:AUTuneSignature(AUTuneScene)]) return nil;
     NSArray *square = plist[@"square"];
     NSArray *depths = plist[@"depths"];
     if (![square isKindOfClass:NSArray.class] || square.count != 4 || ![depths isKindOfClass:NSArray.class]) return nil;

@@ -1,10 +1,8 @@
 #import "AUScene3D.h"
+#import "Core/AUTune.h"
 
-static const double kMaxAngle = 0.24;        // radians at a full tilt, x1
-static const double kFocal = 1.8;
-static const double kDeep = 0.42;            // the background's far end lies this far behind the window
-static const double kRelief = 0.6;
-static const double kReliefBack = 0.03, kReliefFront = 0.08;
+// The numbers (Core/AUTune): swing (degrees at a full tilt, x1), focal, deep (how far behind the window the background's
+// far end lies), window (where between the background and the nearest object the window plane is), relief.
 
 AUCamera AUSceneCamera(AUScene *scene, CGPoint tilt, double strength) {
     AUCamera c;
@@ -15,22 +13,23 @@ AUCamera AUSceneCamera(AUScene *scene, CGPoint tilt, double strength) {
     }
     front = MIN(0.98, MAX(front, background + 0.1));
     double low = MIN(scene.plateLow, background);
-    c.pivot = background + 0.7 * (front - background);
-    c.scale = MIN(1.6, kDeep / MAX(0.15, c.pivot - low));
-    c.focal = kFocal;
-    c.relief = kRelief;
-    c.reliefBack = kReliefBack;
-    c.reliefFront = kReliefFront;
-    c.zFar = 0.5;
-    c.zNear = 0.25;
-    c.angleX = tilt.x * kMaxAngle * strength;
-    c.angleY = tilt.y * kMaxAngle * strength;
+    c.pivot = background + AUTune(@"window") * (front - background);
+    c.scale = MIN(4.0, AUTune(@"deep") / MAX(0.15, c.pivot - low));
+    c.focal = AUTune(@"focal");
+    c.relief = AUTune(@"relief");
+    c.reliefBack = AUTune(@"reliefBack");
+    c.reliefFront = AUTune(@"reliefFront");
+    c.zFar = AUTune(@"zFar");
+    c.zNear = MIN(AUTune(@"zNear"), c.focal * 0.8);
+    double swing = AUTune(@"swing") * M_PI / 180;
+    c.angleX = tilt.x * swing * strength;
+    c.angleY = tilt.y * swing * strength;
     c.zOut = AUCameraZ(c, background);
     return c;
 }
 
 double AUSceneZoom(double strength) {
-    return 1 + 0.07 * strength;
+    return 1 + AUTune(@"zoom") * strength;
 }
 
 double AUCameraZ(AUCamera c, double depth) {

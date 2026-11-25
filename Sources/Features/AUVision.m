@@ -4,6 +4,7 @@
 #import "Core/AUCompat.h"
 #import "Core/AUCore.h"
 #import "Core/AUModelManager.h"
+#import "Core/AUTune.h"
 #import <Accelerate/Accelerate.h>
 #import <CoreImage/CoreImage.h>
 #import <CoreML/CoreML.h>
@@ -588,7 +589,7 @@ static NSArray<NSData *> *objectMasks(CGImageRef image, BOOL peopleOnly, size_t 
     [kept sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) { return [b[0] compare:a[0]]; }];
     NSMutableArray<NSData *> *result = [NSMutableArray array];
     for (NSArray *entry in kept) {
-        if (result.count < 6) [result addObject:entry[1]];
+        if (result.count < (NSUInteger)lround(AUTune(@"visionObjects"))) [result addObject:entry[1]];
     }
     return result;
 }
@@ -894,7 +895,7 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         NSData *split = depthSplit(depthMap.bytes, side, side);
         if (split) masks = @[split];
     }
-    if (depthMap && masks.count) {
+    if (depthMap && masks.count && AUTuneOn(@"depthSplit")) {
         NSMutableArray<NSData *> *parts = [NSMutableArray array];
         for (NSData *mask in masks) {
             if (masks.count + parts.count >= 8) [parts addObject:mask];
@@ -905,14 +906,15 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     // Then every other object SAM sees that stands in front of what is around it: each sheep of a flock, a tree.
     BOOL segmented = NO;
     NSString *samLog = nil;
-    if (!peopleOnly && masks.count < 14) {
+    NSUInteger most = (NSUInteger)lround(AUTune(@"maxObjects"));
+    if (!peopleOnly && AUTuneOn(@"sam") && masks.count < most) {
         NSMutableData *held = [NSMutableData dataWithLength:n];
         uint8_t *h = held.mutableBytes;
         for (NSData *mask in masks) {
             const uint8_t *m = mask.bytes;
             for (size_t i = 0; i < n; i++) if (m[i] > h[i]) h[i] = m[i];
         }
-        NSArray<NSData *> *more = AUSamObjects(square, side, depthMap.bytes, h, 14 - masks.count, &samLog);
+        NSArray<NSData *> *more = AUSamObjects(square, side, depthMap.bytes, h, most - masks.count, &samLog);
         if (more) {
             segmented = YES;
             masks = [masks arrayByAddingObjectsFromArray:more];
@@ -927,7 +929,7 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         const uint8_t *m = mask.bytes;
         for (size_t i = 0; i < n; i++) if (m[i] > u[i]) u[i] = m[i];
     }
-    uint32_t grow = (uint32_t)(side / 32) | 1;
+    uint32_t grow = (uint32_t)(side * AUTune(@"holeGrow") / 100) | 1;
     vImage_Buffer ub = {u, side, side, side}, gb = {grown.mutableBytes, side, side, side};
     vImageMax_Planar8(&ub, &gb, NULL, 0, 0, grow, grow, kvImageEdgeExtend);
     uint8_t *g = grown.mutableBytes;
@@ -999,7 +1001,7 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         // A soft edge, pulled in a pixel or two so no rim of the background rides along with the object.
         NSMutableData *eroded = [NSMutableData dataWithLength:n], *edge = [NSMutableData dataWithLength:n];
         vImage_Buffer mb = {(void *)mask.bytes, side, side, side}, rb = {eroded.mutableBytes, side, side, side}, eb = {edge.mutableBytes, side, side, side};
-        uint32_t pull = (uint32_t)(side / 320) | 1, soften = (uint32_t)(side / 110) | 1;
+        uint32_t pull = (uint32_t)(side * AUTune(@"edgePull") / 100) | 1, soften = (uint32_t)(side * AUTune(@"edgeSoft") / 100) | 1;
         vImageMin_Planar8(&mb, &rb, NULL, 0, 0, pull, pull, kvImageEdgeExtend);
         vImageTentConvolve_Planar8(&rb, &eb, NULL, 0, 0, soften, soften, 0, kvImageEdgeExtend);
         CGImageRef maskImage = AUGrayImage(edge.bytes, side, side);
@@ -1024,7 +1026,7 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         // a thin near thing (a mic stand) would drag what is around it along.
         NSMutableData *smooth = [NSMutableData dataWithLength:n];
         vImage_Buffer db = {(void *)depthMap.bytes, side, side, side}, sb = {smooth.mutableBytes, side, side, side};
-        uint32_t soften = (uint32_t)(side / 16) | 1;
+        uint32_t soften = (uint32_t)(side * AUTune(@"reliefSmooth") / 100) | 1;
         vImageTentConvolve_Planar8(&db, &sb, NULL, 0, 0, soften, soften, 0, kvImageEdgeExtend);
         CGImageRef full = AUGrayImage(smooth.bytes, side, side);
         CGImageRef raw = full ? AUImageResized(full, 256, 256) : NULL;
@@ -1034,7 +1036,8 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         }
         if (full) CGImageRelease(full);
         // The room below the cover (Fill, the lock screen), painted by LaMa; the depth carried down its rows.
-        CGImageRef below = lama && inpainted ? outpaintBelow(lama, background, side, 0.35, NULL) : NULL;
+        double extension = AUTune(@"extension");
+        CGImageRef below = lama && inpainted && extension > 0.01 ? outpaintBelow(lama, background, side, extension, NULL) : NULL;
         size_t tallHigh = side + (below ? CGImageGetHeight(below) : 0);
         if (below) {
             CGColorSpaceRef rgbSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
@@ -1071,6 +1074,7 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     scene.backgroundDepth = backgroundDepth;
     scene.inpainted = inpainted;
     scene.segmented = segmented;
+    scene.tune = AUTuneSignature(AUTuneScene);
     NSMutableArray *depths = [NSMutableArray array];
     for (AUSceneLayer *layer in layers) [depths addObject:[NSString stringWithFormat:@"%.2f", layer.depth]];
     NSString *summary = [NSString stringWithFormat:@"scene %zu px: %lu objects (depth %@ over %.2f), background %@ in %.0f ms",

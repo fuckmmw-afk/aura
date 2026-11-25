@@ -73,7 +73,7 @@ jobs:
           clang -target arm64-apple-ios17.0-macabi -isysroot "$SDK" -iframework "$IOS/System/Library/Frameworks" \
             -F "$IOS/System/Library/Frameworks" -L"$IOS/usr/lib" -fobjc-arc -ISources \
             -DAURA_VERSION='"harness"' -DAURA_MODELS_URL="\"$AURA_MODELS_URL\"" \
-            Tests/AUHarness.m Sources/Core/AUCore.m Sources/Core/AUManifest.m Sources/Core/AUModelManager.m \
+            Tests/AUHarness.m Sources/Core/AUCore.m Sources/Core/AUTune.m Sources/Core/AUManifest.m Sources/Core/AUModelManager.m \
             Sources/Features/AUImage.m Sources/Features/AUPalette.m Sources/Features/AUVision.m Sources/Features/AUScene.m Sources/UI/AULockScreen.m Sources/Features/AUScene3D.m Sources/Features/AUSam.m Sources/UI/AUSceneRenderer.m \
             -framework UIKit -framework CoreML -framework Vision -framework CoreImage -framework Accelerate \
             -framework ImageIO -framework CoreVideo -framework QuartzCore -framework CoreGraphics -framework AVFoundation -framework CoreMedia -framework Metal -o aura-harness

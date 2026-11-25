@@ -22,6 +22,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) double backgroundDepth;
 @property (nonatomic) BOOL inpainted;                         // painted by the model, not the quick fallback
 @property (nonatomic) BOOL segmented;                         // SAM looked for every object (not only Vision's subjects)
+@property (nonatomic, copy, nullable) NSString *tune;          // AUTuneSignature(AUTuneScene) it was made with
 @property (nonatomic, readonly) BOOL complete;                // both: nothing to make again once the models are here
 // Everything moves by its depth around the background's median c: a point at depth d shifts by tilt x motion x side
 // x factor, factor = (d - c) x 2, so the near goes with the tilt and the far against it. The background bends so per

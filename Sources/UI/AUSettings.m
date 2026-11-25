@@ -1,6 +1,7 @@
 #import "AUSettings.h"
 #import "Core/AUCore.h"
 #import "Core/AUModelManager.h"
+#import "Core/AUTune.h"
 #import "Core/AUTaurus.h"
 #import "Features/AUPipeline.h"
 #import "UI/AULockScreen.h"
@@ -17,6 +18,54 @@ static SGModRow *modelRow(NSString *modelID, NSString *feature) {
     });
     row.refreshOn = AUModelsDidChangeNotification;
     return row;
+}
+
+// A change shows once the hand has stopped: at once for the look, after a pause for what is made again (scenes, clips).
+static void tuneChanged(AUTuneEffect effect) {
+    static NSUInteger generation;
+    NSUInteger mine = ++generation;
+    double delay = effect == AUTuneLive ? 0.3 : 1.5;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (mine == generation) AUSettingsChanged();
+    });
+}
+
+static UIViewController *tunePage(void) {
+    NSMutableArray *sections = [NSMutableArray array];
+    for (AUTuneSection *tuneSection in AUTuneSections()) {
+        NSMutableArray *rows = [NSMutableArray array];
+        for (AUTuneItem *item in tuneSection.items) {
+            NSString *name = item.name;
+            AUTuneEffect effect = item.effect;
+            if (item.format == AUTuneSwitch) {
+                NSString *key = [@"aura.t." stringByAppendingString:name];
+                SGModRow *row = item.fallback >= 0.5 ? AURowSwitch(item.title, item.subtitle, key) : AURowOption(item.title, item.subtitle, key);
+                row.changed = ^(BOOL on) { tuneChanged(effect); };
+                ADD(rows, row);
+                continue;
+            }
+            NSString *subtitle = [NSString stringWithFormat:@"%@%@по умолчанию %@", item.subtitle ?: @"", item.subtitle ? @" · " : @"",
+                                  AUTuneText(item, item.fallback)];
+            SGModRow *row = AURowSlider(item.title, subtitle, item.minimum, item.maximum, item.step,
+                                        ^double { return AUTune(name); },
+                                        ^(double value) {
+                                            AUTuneSet(name, value);
+                                            tuneChanged(effect);
+                                        },
+                                        ^NSString *(double value) { return AUTuneText(item, value); });
+            ADD(rows, row);
+        }
+        ADD(sections, AUSection(tuneSection.title, rows, tuneSection.footer));
+    }
+    NSMutableArray *reset = [NSMutableArray array];
+    SGModRow *resetRow = AURowAction(@"Сбросить всё", @"Все числа этой страницы — к значениям по умолчанию", ^{
+        AUTuneResetAll();
+        tuneChanged(AUTuneScene);
+    });
+    resetRow.color = UIColor.systemRedColor;
+    ADD(reset, resetRow);
+    ADD(sections, AUSection(nil, reset, @"Ползунок «Сила параллакса» на главной странице умножает размах поворота в плеере и на экране блокировки."));
+    return [[NSClassFromString(@"SGModPage") alloc] initWithTitle:@"Тонкая настройка" intro:nil sections:sections footer:nil];
 }
 
 UIViewController *AUSettingsPage(void) {
@@ -53,6 +102,8 @@ UIViewController *AUSettingsPage(void) {
                                      ^(double value) { AUSetNumber(AUKeyDepthStrength, value); },
                                      ^NSString *(double value) { return [NSString stringWithFormat:@"×%.1f", value]; });
     ADD(cover, strength);
+    SGModRow *tune = AURowPage(@"Тонкая настройка", ^UIViewController *{ return tunePage(); });
+    ADD(cover, AURowSymbol(tune, @"slider.horizontal.3"));
     SGModRow *cutout = AURowOption(@"Артист из обложки", @"Объекты чуть крупнее и выходят за рамку обложки", AUKeyPopOut);
     cutout.changed = ^(BOOL on) { AUSettingsChanged(); };
     ADD(cover, AURowSymbol(cutout, @"person.crop.rectangle.stack"));
@@ -74,6 +125,9 @@ UIViewController *AUSettingsPage(void) {
     ADD(models, modelRow(AUModelDepth, @"глубина"));
     ADD(models, modelRow(AUModelUpscale, @"апскейл"));
     ADD(models, modelRow(AUModelInpaint, @"дорисовка фона"));
+    ADD(models, modelRow(AUModelSamEncoder, @"все объекты"));
+    ADD(models, modelRow(AUModelSamPrompt, @"все объекты"));
+    ADD(models, modelRow(AUModelSamDecoder, @"все объекты"));
     SGModRow *vision = AURowStat(@"Vision · маска человека", ^NSString *{ return @"системная · 0 МБ"; });
     ADD(models, vision);
     SGModRow *kmeans = AURowStat(@"Палитра · k-means (vDSP)", ^NSString *{ return @"без нейросети · 0 МБ"; });
@@ -107,7 +161,7 @@ UIViewController *AUSettingsPage(void) {
     ADD(stats, AURowAction(@"Поделиться логом", @"Documents/Aura/aura.log, в нём строка телеметрии раз в минуту", ^{ AUShareFile(AULogURL()); }));
     ADD(sections, AUSection(@"Диагностика", stats, nil));
 
-    NSString *footer = [NSString stringWithFormat:@"Aura %s — отдельный аддон к Taurus, ничего в Taurus не меняет.\nTaurus © Vojtěch Škopek (spoti.pw), PolyForm Strict 1.0.0.\nDepth Anything V2 — Apache-2.0, Real-ESRGAN — BSD-3-Clause, Big-LaMa — Apache-2.0.", AURA_VERSION];
+    NSString *footer = [NSString stringWithFormat:@"Aura %s — отдельный аддон к Taurus, ничего в Taurus не меняет.\nTaurus © Vojtěch Škopek (spoti.pw), PolyForm Strict 1.0.0.\nDepth Anything V2 — Apache-2.0, Real-ESRGAN — BSD-3-Clause, Big-LaMa — Apache-2.0, SAM 2.1 — Apache-2.0.", AURA_VERSION];
     return [[NSClassFromString(@"SGModPage") alloc] initWithTitle:@"Aura" intro:nil sections:sections footer:footer];
 }
 

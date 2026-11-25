@@ -1,11 +1,12 @@
 #import "AUSam.h"
 #import "Core/AUCore.h"
 #import "Core/AUModelManager.h"
+#import "Core/AUTune.h"
 #import "Features/AUImage.h"
 #import <Accelerate/Accelerate.h>
 #import <CoreML/CoreML.h>
 
-enum { kGrid = 8, kLow = 256 };
+enum { kLow = 256 };
 
 typedef struct {
     float score;
@@ -74,6 +75,11 @@ NSArray<NSData *> *AUSamObjects(CGImageRef square, size_t side, const uint8_t *d
     MLFeatureValue *embedding = [encoded featureValueForName:@"image_embedding"], *s0 = [encoded featureValueForName:@"feats_s0"],
                    *s1 = [encoded featureValueForName:@"feats_s1"];
     double inputSide = constraint.pixelsWide ?: 1024;
+    // The numbers are Core/AUTune's.
+    const int kGrid = (int)lround(AUTune(@"samGrid"));
+    const float minScore = (float)AUTune(@"samScore");
+    const double stability = AUTune(@"samStability"), minArea = AUTune(@"samMinArea"), maxArea = AUTune(@"samMaxArea");
+    const double contrast = AUTune(@"samContrast");
     AUCandidate *candidates = calloc(kGrid * kGrid * 3, sizeof(AUCandidate));
     int found = 0;
     for (int gy = 0; gy < kGrid; gy++) {
@@ -96,7 +102,7 @@ NSArray<NSData *> *AUSamObjects(CGImageRef square, size_t side, const uint8_t *d
                 if (masks.count < 3 * kLow * kLow || scores.count < 3) continue;
                 for (int k = 0; k < 3; k++) {
                     float score = valueAt(scores, k * scores.strides.lastObject.integerValue);
-                    if (score < 0.75) continue;
+                    if (score < minScore) continue;
                     float *logits = malloc(sizeof(float) * kLow * kLow);
                     uint8_t *mask = calloc(kLow * kLow, 1);
                     size_t area = 0, loose = 0, strict = 0;
@@ -116,7 +122,7 @@ NSArray<NSData *> *AUSamObjects(CGImageRef square, size_t side, const uint8_t *d
                     // Stable (the edge does not wander with the threshold), and an object's size, not the whole picture.
                     double share = area / (double)(kLow * kLow);
                     int borders = (x0 <= 1) + (y0 <= 1) + (x1 >= kLow - 2) + (y1 >= kLow - 2);
-                    if (!loose || strict / (double)loose < 0.85 || share < 0.003 || share > 0.30 || borders >= 3) {
+                    if (!loose || strict / (double)loose < stability || share < minArea || share > maxArea || borders >= 3) {
                         free(logits);
                         free(mask);
                         continue;
@@ -167,7 +173,7 @@ NSArray<NSData *> *AUSamObjects(CGImageRef square, size_t side, const uint8_t *d
             own[i] = candidate->mask[i] && !claimed[i] ? 255 : 0;
             free_ += own[i] != 0;
         }
-        if (free_ < candidate->area * 0.6 || free_ < kLow * kLow * 0.003) continue;
+        if (free_ < candidate->area * 0.6 || free_ < kLow * kLow * minArea) continue;
         // In front of its surroundings: its median depth over that of a ring around it.
         if (depthLow) {
             vImage_Buffer ob = {own, kLow, kLow, kLow}, rb = {ring, kLow, kLow, kLow};
@@ -176,7 +182,7 @@ NSArray<NSData *> *AUSamObjects(CGImageRef square, size_t side, const uint8_t *d
             size_t inCount = 0, ringCount = 0;
             size_t inside = median(depthLow, own, kLow * kLow, YES, &inCount);
             size_t around = median(depthLow, ring, kLow * kLow, YES, &ringCount);
-            if (ringCount && (double)inside - (double)around < 0.035 * 255) continue;
+            if (ringCount && (double)inside - (double)around < contrast * 255) continue;
             [kept addObject:[NSString stringWithFormat:@"%.0f%%/%.2f", 100.0 * free_ / (kLow * kLow), ((double)inside - around) / 255]];
         }
         for (int i = 0; i < kLow * kLow; i++) if (own[i]) claimed[i] = 255;

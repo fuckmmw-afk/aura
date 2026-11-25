@@ -3,6 +3,7 @@
 #import "AUVision.h"
 #import "Core/AUCore.h"
 #import "Core/AUModelManager.h"
+#import "Core/AUTune.h"
 #import "Core/AUTaurus.h"
 
 NSNotificationName const AUArtworkDidChangeNotification = @"AUArtworkDidChangeNotification";
@@ -177,7 +178,8 @@ static const uint64_t kCacheLimit = 150ull * 1024 * 1024;
     BOOL needSource = !artwork.source || (wantUpscale && !throttled && !artwork.upscaleChecked) || (!wantUpscale && artwork.upscaled);
     BOOL needDepth = (wantDepth || wantScene) && !artwork.depth && !throttled;
     BOOL needScene = wantScene && !throttled
-        && (!artwork.sceneChecked || artwork.scenePeopleOnly != peopleOnly || (artwork.scene && !artwork.scene.complete && lamaReady));
+        && (!artwork.sceneChecked || artwork.scenePeopleOnly != peopleOnly || (artwork.scene && !artwork.scene.complete && lamaReady)
+           || (artwork.scene && ![artwork.scene.tune isEqualToString:AUTuneSignature(AUTuneScene)]));
     if (wantScene && !lamaReady) {
         for (NSString *model in @[AUModelInpaint, AUModelSamEncoder, AUModelSamPrompt, AUModelSamDecoder]) [AUModelManager.shared ensure:model];
     }

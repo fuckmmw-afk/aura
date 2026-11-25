@@ -2,6 +2,7 @@
 #import "Core/AUCore.h"
 #import "Core/AUTaurus.h"
 #import "Features/AUPipeline.h"
+#import "Core/AUTune.h"
 #import "Features/AUScene3D.h"
 #import "UI/AUSceneRenderer.h"
 #import <Accelerate/Accelerate.h>
@@ -12,7 +13,6 @@
 
 static const CGFloat kCoverMinWidth = 200;
 static const CGFloat kStepOut = 1.06;            // the objects' scale over the cover, from its foot (the cover only)
-static const CGFloat kMaxTilt = 0.15;            // gravity change (≈ radians) for a full tilt
 
 typedef NS_ENUM(NSInteger, AUSurfaceKind) {
     AUSurfaceCover,
@@ -82,10 +82,17 @@ static CALayer *plainLayer(void) {
 // Fill as a full screen: the scene's stage runs past Taurus's field (0.625 of the screen) down to the screen's foot, the
 // cover across the width (a touch bigger, 1.12) with the room LaMa painted below it, sharp down to 0.56 of the screen,
 // a light blur coming in by 0.70, a softer one by 0.84, faded into the player's colour from 0.68 to 0.94.
-static const CGFloat kSoftRamps[2][2] = {{0.56, 0.70}, {0.64, 0.84}};
-static const size_t kSoftSides[2] = {200, 120};
-static const CGFloat kFadeFrom = 0.68, kFadeTo = 0.94;
-static const CGFloat kFillCrop = 1.12;
+// (The numbers are Core/AUTune's: blur1From/To/Size, blur2From/To/Size, fadeFrom/To, fillCrop.)
+static void softRamp(int k, CGFloat *from, CGFloat *to) {
+    *from = AUTune(k ? @"blur2From" : @"blur1From");
+    *to = MAX(*from + 0.01, AUTune(k ? @"blur2To" : @"blur1To"));
+}
+
+// The small copy's side for a blur of `percent` of the width (two tent passes of 5 are about 1.2 % of 200 px).
+static size_t softSide(int k) {
+    double percent = AUTune(k ? @"blur2Size" : @"blur1Size");
+    return percent <= 0.01 ? 0 : (size_t)MAX(16.0, MIN(800.0, 240.0 / percent));
+}
 
 static CAGradientLayer *ramp(CGFloat from, CGFloat to, BOOL rising) {
     NSMutableArray *locations = [NSMutableArray array], *colors = [NSMutableArray array];
@@ -150,6 +157,7 @@ static BOOL forCurrentTrack(AUArtwork *artwork) {
     UIView *_subjectHost;            // a zero-size view in the tilt view, so nothing takes it for the cover
     AUSurface *_coverSurface, *_fillSurface;
     CAGradientLayer *_fade;
+    CGFloat _fadeFrom, _fadeTo;
     __weak AUArtwork *_shown;
     NSString *_shownKey;
     BOOL _shownMoving, _wantPlane;
@@ -307,7 +315,7 @@ static UIView *taurusField(void) {
         CAGradientLayer *mask = [CAGradientLayer layer];
         mask.actions = noActions();
         mask.colors = @[(id)UIColor.whiteColor.CGColor, (id)UIColor.whiteColor.CGColor, (id)[UIColor colorWithWhite:1 alpha:0].CGColor];
-        mask.locations = @[@0, @(kFadeFrom + 0.1), @1];
+        mask.locations = @[@0, @(AUTune(@"fadeFrom") + 0.1), @1];
         surface.objects.mask = mask;
         surface.objectsMask = mask;
         NSMutableArray *softs = [NSMutableArray array], *masks = [NSMutableArray array];
@@ -369,7 +377,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     double reach = surface.content ? surface.content.plateReach : 0.3;
     if (surface.kind == AUSurfaceFill && surface.renderer) {
         // The cover across the stage's width from its top, the room below it after; zoomed round the cover's middle.
-        CGFloat side0 = bounds.size.width * kFillCrop;
+        CGFloat side0 = bounds.size.width * AUTune(@"fillCrop");
         CGFloat side = side0 * (_shownMoving ? AUSceneZoom(AUNumber(AUKeyDepthStrength, 1.0)) : 1);
         surface.pictureRect = CGRectMake((bounds.size.width - side) / 2, (side0 - side) / 2, side, side * surface.renderer.frameTall);
     } else {
@@ -387,7 +395,9 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
         surface.softMasks[k].frame = soft.bounds;
         // The ramp is the stage's: its share of the stage's height turned into the picture's.
         CGFloat h = MAX(1, surface.pictureRect.size.height), y = surface.pictureRect.origin.y, H = bounds.size.height;
-        CGFloat from = (kSoftRamps[k][0] * H - y) / h, to = (kSoftRamps[k][1] * H - y) / h;
+        CGFloat rampFrom, rampTo;
+        softRamp((int)k, &rampFrom, &rampTo);
+        CGFloat from = (rampFrom * H - y) / h, to = (rampTo * H - y) / h;
         NSMutableArray *locations = [NSMutableArray array];
         NSArray *base = ramp(0, 1, YES).locations;
         for (NSUInteger i = 0; i < base.count; i++) {
@@ -499,7 +509,13 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     }
     CALayer *taurusMask = ivarLayer(field, "_fillMask");
     if (take) {
-        if (!_fade) _fade = ramp(kFadeFrom, kFadeTo, NO);
+        CGFloat fadeFrom = AUTune(@"fadeFrom"), fadeTo = MAX(fadeFrom + 0.01, AUTune(@"fadeTo"));
+        if (!_fade || _fadeFrom != fadeFrom || _fadeTo != fadeTo) {
+            if (fill.mask == _fade) fill.mask = nil;
+            _fade = ramp(fadeFrom, fadeTo, NO);
+            _fadeFrom = fadeFrom;
+            _fadeTo = fadeTo;
+        }
         _fade.frame = [self fillStageBounds];
         if (fill.mask != _fade) fill.mask = _fade;
         // The stage runs on below the field Taurus gives its picture.
@@ -678,7 +694,9 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
         surface.renderer = nil;
     }
     for (NSUInteger k = 0; k < surface.softs.count; k++) {
-        CGImageRef soft = blurredScene(scene, kSoftSides[k], !cover && threeD);
+        size_t softPixels = softSide((int)k);
+        CGImageRef soft = softPixels ? blurredScene(scene, softPixels, !cover && threeD) : NULL;
+        surface.softs[k].hidden = !soft;
         surface.softs[k].contents = (__bridge id)soft;
         if (soft) CGImageRelease(soft);
     }
@@ -831,12 +849,13 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
             _refSet = YES;
         }
         double dt = MIN(0.1, MAX(1.0 / 120, link.targetTimestamp - link.timestamp));
-        double follow = 1 - exp(-dt / 6.0);
+        double follow = 1 - exp(-dt / AUTune(@"follow"));
         _refX += (gx - _refX) * follow;
         _refY += (gy - _refY) * follow;
-        CGFloat tx = (CGFloat)MAX(-1.0, MIN(1.0, (gx - _refX) / kMaxTilt));
-        CGFloat ty = (CGFloat)MAX(-1.0, MIN(1.0, -(gy - _refY) / kMaxTilt));
-        double smooth = 1 - exp(-dt / 0.05);
+        double full = AUTune(@"tiltFull");
+        CGFloat tx = (CGFloat)MAX(-1.0, MIN(1.0, (gx - _refX) / full)) * (AUTuneOn(@"invertX") ? -1 : 1);
+        CGFloat ty = (CGFloat)MAX(-1.0, MIN(1.0, -(gy - _refY) / full)) * (AUTuneOn(@"invertY") ? -1 : 1);
+        double smooth = 1 - exp(-dt / AUTune(@"smooth"));
         CGPoint next = CGPointMake(_tiltNow.x + (tx - _tiltNow.x) * smooth, _tiltNow.y + (ty - _tiltNow.y) * smooth);
         CGFloat moved = hypot(next.x - _tiltNow.x, next.y - _tiltNow.y);
         if (moved > 0.0015) _lastMove = now;

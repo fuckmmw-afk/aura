@@ -1,6 +1,7 @@
 #import "AULockScreen.h"
 #import "Core/AUCore.h"
 #import "Features/AUImage.h"
+#import "Core/AUTune.h"
 #import "Features/AUScene3D.h"
 #import <AVFoundation/AVFoundation.h>
 #import <Accelerate/Accelerate.h>
@@ -13,7 +14,8 @@
 #import "Features/AUPipeline.h"
 #endif
 
-static const int32_t kFPS = 30, kLoopSeconds = 6;
+// (The numbers are Core/AUTune's: fps, loop, lockBoost, orbitX/Y, lockBlur, lockBlurFrom/To, lockShade, lockBitrate.)
+static int32_t clipFPS(void) { return (int32_t)lround(AUTune(@"fps")); }
 
 #pragma mark - the clip, on the CPU
 //
@@ -39,10 +41,9 @@ typedef struct {
 } AUClipLayers;
 
 // The lock screen's flight: a wide orbit and half again the app's swing — nobody tilts a locked phone to see it.
-static const double kLockBoost = 1.5;
 
 static CGPoint tiltAt(double phase) {
-    return CGPointMake(1.0 * sin(2 * M_PI * phase), 0.7 * cos(2 * M_PI * phase));
+    return CGPointMake(AUTune(@"orbitX") * sin(2 * M_PI * phase), AUTune(@"orbitY") * cos(2 * M_PI * phase));
 }
 
 static CGContextRef bgraContext(size_t width, size_t height, void *data, size_t rowBytes) {
@@ -96,7 +97,8 @@ static void extendCover(CGContextRef base, CGRect square, double side, double fr
     for (long y = 0; y < top; y++) memcpy(p + y * row, p + fromTop * row, row);
     for (long y = bottom; y < (long)h; y++) memcpy(p + y * row, p + fromBottom * row, row);
     CGImageRef full = CGBitmapContextCreateImage(base);
-    const double radii[3] = {0.006, 0.016, 0.035};
+    double blur = AUTune(@"lockBlur");
+    const double radii[3] = {0.006 * blur, 0.016 * blur, 0.035 * blur};
     // Each step's share against the distance's progress (0 = well inside the cover, 1 = far out).
     static const double ranges[3][2] = {{0.0, 0.30}, {0.18, 0.60}, {0.45, 1.0}};
     CGContextRef levels[3];
@@ -146,7 +148,7 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     l.moving = moving;
     // The square across the frame's width (zoomed for the camera's swing), a little above the middle, its own rows
     // carried out above and below.
-    l.strength = kLockBoost * AUNumber(AUKeyDepthStrength, 1.0);
+    l.strength = AUTune(@"lockBoost") * AUNumber(AUKeyDepthStrength, 1.0);
     double zoom = l.moving ? AUSceneZoom(l.strength) : 1.0;
     double side = size.width * zoom;
     l.side = side;
@@ -166,8 +168,8 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     CGContextDrawImage(base, inBase, (scene.tall ?: scene.background).CGImage);
     CGRect pictureTopDown = CGRectMake(inBase.origin.x, top + margin, side, pictureHigh);
     // The blur only at the foot: from 0.74 of the frame (the picture's own foot when it is shorter) to the bottom.
-    double footFrom = scene.tall ? margin + size.height * 0.74 : margin + top + side - side * 0.16;
-    double footTo = scene.tall ? margin + size.height * 1.0 : margin + top + side + side * 0.5;
+    double footFrom = scene.tall ? margin + size.height * AUTune(@"lockBlurFrom") : margin + top + side - side * 0.16;
+    double footTo = scene.tall ? margin + size.height * AUTune(@"lockBlurTo") : margin + top + side + side * 0.5;
     footFrom = MIN(footFrom, margin + top + pictureHigh - side * 0.1);
     extendCover(base, pictureTopDown, side, footFrom, MAX(footFrom + side * 0.15, footTo));
     l.background = CGBitmapContextCreateImage(base);
@@ -185,10 +187,10 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     }
     CGContextRef shade = bgraContext((size_t)size.width, (size_t)size.height, NULL, 0);
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    CGFloat components[8] = {0, 0, 0, 0.28, 0, 0, 0, 0};
+    CGFloat components[8] = {0, 0, 0, AUTune(@"lockShade"), 0, 0, 0, 0};
     CGFloat locations[2] = {0, 1};
     CGGradientRef gradient = CGGradientCreateWithColorComponents(space, components, locations, 2);
-    CGContextDrawLinearGradient(shade, gradient, CGPointMake(0, 0), CGPointMake(0, size.height * 0.28), 0);
+    CGContextDrawLinearGradient(shade, gradient, CGPointMake(0, 0), CGPointMake(0, size.height * AUTune(@"lockShadeHeight")), 0);
     CGGradientRelease(gradient);
     CGColorSpaceRelease(space);
     l.shade = CGBitmapContextCreateImage(shade);
@@ -260,7 +262,7 @@ BOOL AULockClipWrite(NSURL *file, AUScene *scene, CGSize size, BOOL moving) {
         AVVideoCodecKey: AVVideoCodecTypeH264,
         AVVideoWidthKey: @(width),
         AVVideoHeightKey: @(height),
-        AVVideoCompressionPropertiesKey: @{AVVideoAverageBitRateKey: @(moving ? 3500000 : 1500000), AVVideoMaxKeyFrameIntervalKey: @(kFPS)},
+        AVVideoCompressionPropertiesKey: @{AVVideoAverageBitRateKey: @(moving ? AUTune(@"lockBitrate") * 1e6 : 1500000), AVVideoMaxKeyFrameIntervalKey: @(clipFPS())},
     }];
     video.expectsMediaDataInRealTime = NO;
     AVAssetWriterInputPixelBufferAdaptor *adaptor = [AVAssetWriterInputPixelBufferAdaptor
@@ -277,7 +279,8 @@ BOOL AULockClipWrite(NSURL *file, AUScene *scene, CGSize size, BOOL moving) {
     }
     [writer startSessionAtSourceTime:kCMTimeZero];
     AUClipLayers l = makeLayers(scene, size, moving);
-    int32_t frames = l.moving ? kLoopSeconds * kFPS : kFPS;
+    int32_t fps = clipFPS();
+    int32_t frames = l.moving ? (int32_t)lround(AUTune(@"loop") * fps) : fps;
     BOOL ok = YES;
     for (int32_t index = 0; index < frames && ok; index++) {
         @autoreleasepool {
@@ -293,7 +296,7 @@ BOOL AULockClipWrite(NSURL *file, AUScene *scene, CGSize size, BOOL moving) {
                 CGContextRelease(context);
             }
             CVPixelBufferUnlockBaseAddress(buffer, 0);
-            ok = context && [adaptor appendPixelBuffer:buffer withPresentationTime:CMTimeMake(index, kFPS)];
+            ok = context && [adaptor appendPixelBuffer:buffer withPresentationTime:CMTimeMake(index, fps)];
             CVPixelBufferRelease(buffer);
         }
     }
@@ -306,7 +309,7 @@ BOOL AULockClipWrite(NSURL *file, AUScene *scene, CGSize size, BOOL moving) {
         return NO;
     }
     [video markAsFinished];
-    [writer endSessionAtSourceTime:CMTimeMake(frames, kFPS)];
+    [writer endSessionAtSourceTime:CMTimeMake(frames, fps)];
     dispatch_semaphore_t written = dispatch_semaphore_create(0);
     [writer finishWritingWithCompletionHandler:^{ dispatch_semaphore_signal(written); }];
     dispatch_semaphore_wait(written, DISPATCH_TIME_FOREVER);
@@ -422,8 +425,8 @@ static AULockMaterial *materialOf(AUArtwork *artwork, BOOL moving) {
     AULockMaterial *material = [AULockMaterial new];
     material.scene = artwork.scene ?: plainScene(artwork.source);
     material.moving = moving;
-    material.signature = [NSString stringWithFormat:@"%@|%d|%lu|%d|%d|v9", artwork.key, material.moving, (unsigned long)material.scene.layers.count,
-                          material.scene.inpainted, artwork.upscaled];
+    material.signature = [NSString stringWithFormat:@"%@|%d|%lu|%d|%d|v10|%@", artwork.key, material.moving, (unsigned long)material.scene.layers.count,
+                          material.scene.inpainted, artwork.upscaled, AUTuneSignature(AUTuneLock)];
     return material;
 }
 
