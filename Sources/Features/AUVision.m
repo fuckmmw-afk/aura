@@ -723,6 +723,58 @@ static CGImageRef lamaFill(MLModel *model, CGImageRef cover, const uint8_t *hole
     return rgba8(filled, filled.extent);
 }
 
+// An object that is really two things at clearly different depths (two people one behind the other, a person and the
+// bath before them — Vision often gives such a group as one): its depth inside the mask has two humps with a valley
+// between. Split at the valley (Otsu), softly over a few hundredths of depth, so each part moves by its own depth;
+// a single body whose depth only ramps (lying down, reaching out) has no valley and stays whole.
+static NSArray<NSData *> *depthParts(NSData *mask, const uint8_t *depth, size_t n) {
+    enum { kBins = 32 };
+    const uint8_t *m = mask.bytes;
+    double hist[kBins] = {0}, total = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (m[i] < 128) continue;
+        hist[depth[i] * kBins / 256] += 1;
+        total += 1;
+    }
+    if (total < n * 0.02) return @[mask];
+    double sum = 0;
+    for (int b = 0; b < kBins; b++) sum += b * hist[b];
+    double wFar = 0, sumFar = 0, best = -1;
+    int cut = -1;
+    for (int b = 0; b < kBins - 1; b++) {
+        wFar += hist[b];
+        sumFar += b * hist[b];
+        double wNear = total - wFar;
+        if (wFar < total * 0.15 || wNear < total * 0.15) continue;
+        double mFar = sumFar / wFar, mNear = (sum - sumFar) / wNear;
+        double between = wFar * wNear * (mNear - mFar) * (mNear - mFar);
+        if (between > best) {
+            best = between;
+            cut = b;
+        }
+    }
+    if (cut < 0) return @[mask];
+    double far = 0, near = 0, peakFar = 0, peakNear = 0, wf = 0, wn = 0;
+    for (int b = 0; b < kBins; b++) {
+        if (b <= cut) { far += b * hist[b]; wf += hist[b]; peakFar = MAX(peakFar, hist[b]); }
+        else { near += b * hist[b]; wn += hist[b]; peakNear = MAX(peakNear, hist[b]); }
+    }
+    double gap = (near / wn - far / wf) / kBins;
+    double valley = (hist[cut] + hist[cut + 1] + (cut > 0 ? hist[cut - 1] : hist[cut])) / 3;
+    if (gap < 0.15 || valley > 0.3 * MIN(peakFar, peakNear)) return @[mask];
+    double threshold = (cut + 1.0) / kBins * 255;
+    NSMutableData *farMask = [NSMutableData dataWithLength:n], *nearMask = [NSMutableData dataWithLength:n];
+    uint8_t *f = farMask.mutableBytes, *ne = nearMask.mutableBytes;
+    for (size_t i = 0; i < n; i++) {
+        double t = MAX(0.0, MIN(1.0, (depth[i] - threshold) / 16 + 0.5));
+        t = t * t * (3 - 2 * t);
+        ne[i] = (uint8_t)lround(m[i] * t);
+        f[i] = (uint8_t)(m[i] - ne[i]);
+    }
+    AULog(@"scene: an object split by depth at %.2f (parts %.0f%% / %.0f%%, %.2f apart)", threshold / 255, 100 * wf / total, 100 * wn / total, gap);
+    return @[farMask, nearMask];
+}
+
 // The background's depth: where the objects were, the depth around them carried in (normalized convolution at 128
 // px), then softened, so the plate bends smoothly and has no object edge left to tear along.
 static CGImageRef plateDepthOf(const uint8_t *depth, const uint8_t *holes, size_t side) {
@@ -784,6 +836,14 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     if (!masks.count && depthMap) {
         NSData *split = depthSplit(depthMap.bytes, side, side);
         if (split) masks = @[split];
+    }
+    if (depthMap && masks.count) {
+        NSMutableArray<NSData *> *parts = [NSMutableArray array];
+        for (NSData *mask in masks) {
+            if (masks.count + parts.count >= 8) [parts addObject:mask];
+            else [parts addObjectsFromArray:depthParts(mask, depthMap.bytes, n)];
+        }
+        masks = parts;
     }
     // The objects' room, grown a little so no fringe of theirs is left in the background.
     NSMutableData *unionMask = [NSMutableData dataWithLength:n], *grown = [NSMutableData dataWithLength:n];
