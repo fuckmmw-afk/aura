@@ -523,9 +523,32 @@ static NSArray<NSData *> *objectMasks(CGImageRef image, BOOL peopleOnly, size_t 
     };
     NSMutableArray<NSData *> *taken = [NSMutableArray array];
     for (NSData *subject in subjects) {
-        BOOL holdsPerson = NO;
-        for (NSData *p in people) holdsPerson |= inside(p, subject) > 0.5;
-        if (!peopleOnly || holdsPerson) [taken addObject:subject];
+        NSMutableArray<NSData *> *held = [NSMutableArray array];
+        for (NSData *p in people) if (inside(p, subject) > 0.5) [held addObject:p];
+        if (peopleOnly && !held.count) continue;
+        if (held.count < 2) {
+            [taken addObject:subject];
+            continue;
+        }
+        // Vision's subject often holds a whole group: each person moves on its own, and what is left of the subject
+        // (a bath, a table, things in hands set down) is one more object, its slivers along the people opened away.
+        for (NSData *p in held) if (![taken containsObject:p]) [taken addObject:p];
+        if (peopleOnly) continue;
+        NSMutableData *rest = [NSMutableData dataWithLength:n], *opened = [NSMutableData dataWithLength:n];
+        uint8_t *r = rest.mutableBytes;
+        const uint8_t *s = subject.bytes;
+        for (size_t i = 0; i < n; i++) {
+            uint8_t most = 0;
+            for (NSData *p in held) most = MAX(most, ((const uint8_t *)p.bytes)[i]);
+            r[i] = most < 96 ? s[i] : 0;
+        }
+        uint32_t open = (uint32_t)(mw / 60) | 1;
+        vImage_Buffer rb = {r, mh, mw, mw}, ob = {opened.mutableBytes, mh, mw, mw};
+        vImageMin_Planar8(&rb, &ob, NULL, 0, 0, open, open, kvImageEdgeExtend);
+        vImageMax_Planar8(&ob, &rb, NULL, 0, 0, open, open, kvImageEdgeExtend);
+        // The opening squared off the subject's soft edge: the subject's own edge back where it is kept.
+        for (size_t i = 0; i < n; i++) r[i] = MIN(r[i], s[i]);
+        [taken addObject:rest];
     }
     // A person no subject took (Vision's two requests do not always agree) is a layer of its own.
     for (NSData *p in people) {
@@ -712,7 +735,8 @@ static CGImageRef plateDepthOf(const uint8_t *depth, const uint8_t *holes, size_
         double keep = (255 - h[i]) / 255.0;
         a[i] = (uint8_t)lround(d[i] * keep + filled * (1 - keep));
     }
-    vImageTentConvolve_Planar8(&ab, &bb, NULL, 0, 0, 9, 9, 0, kvImageEdgeExtend);
+    // Softened well (a fifth of the side): a thing nobody lifted out bends with its surroundings, not on its own.
+    vImageTentConvolve_Planar8(&ab, &bb, NULL, 0, 0, 25, 25, 0, kvImageEdgeExtend);
     CGImageRef small = AUGrayImage(b, kSmall, kSmall);
     free(d); free(h); free(num); free(den); free(a); free(b);
     return small;
@@ -803,17 +827,40 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     CGImageRef background = CGBitmapContextCreateImage(canvas);
     CGContextRelease(canvas);
 
-    // The objects, each on a canvas-sized layer, edges feathered a pixel.
+    // The objects, each on a canvas-sized layer, edges feathered a pixel, far to near.
     NSMutableArray<AUSceneLayer *> *layers = [NSMutableArray array];
     double backgroundDepth = depthMap ? medianDepth(depthMap.bytes, g, n, YES) : 0.3;
+    NSMutableArray<NSArray *> *ordered = [NSMutableArray array];
+    for (NSData *mask in masks) [ordered addObject:@[@(depthMap ? medianDepth(depthMap.bytes, mask.bytes, n, NO) : 0.8), mask]];
+    [ordered sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) { return [a[0] compare:b[0]]; }];
+    // Where an object meets a nearer one, it carries a band of the cover from under that one: when the two part a
+    // little, the cover shows in the seam, not the painted room behind them both.
+    NSMutableArray<NSData *> *nearer = [NSMutableArray array];
+    for (NSUInteger i = 0; i < ordered.count; i++) {
+        NSMutableData *front = [NSMutableData dataWithLength:n];
+        uint8_t *f = front.mutableBytes;
+        for (NSUInteger j = i + 1; j < ordered.count; j++) {
+            const uint8_t *m = [ordered[j][1] bytes];
+            for (size_t p = 0; p < n; p++) if (m[p] > f[p]) f[p] = m[p];
+        }
+        [nearer addObject:front];
+    }
     CGColorSpaceRef rgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    for (NSData *mask in masks) {
+    for (NSUInteger index = 0; index < ordered.count; index++) {
+        NSData *mask = ordered[index][1];
         // A soft edge, pulled in a pixel or two so no rim of the background rides along with the object.
         NSMutableData *eroded = [NSMutableData dataWithLength:n], *edge = [NSMutableData dataWithLength:n];
         vImage_Buffer mb = {(void *)mask.bytes, side, side, side}, rb = {eroded.mutableBytes, side, side, side}, eb = {edge.mutableBytes, side, side, side};
         uint32_t pull = (uint32_t)(side / 320) | 1, soften = (uint32_t)(side / 110) | 1;
         vImageMin_Planar8(&mb, &rb, NULL, 0, 0, pull, pull, kvImageEdgeExtend);
         vImageTentConvolve_Planar8(&rb, &eb, NULL, 0, 0, soften, soften, 0, kvImageEdgeExtend);
+        if (index + 1 < ordered.count) {
+            uint32_t reach = (uint32_t)(side / 40) | 1;
+            vImageMax_Planar8(&mb, &rb, NULL, 0, 0, reach, reach, kvImageEdgeExtend);
+            const uint8_t *grownMask = eroded.bytes, *front = nearer[index].bytes;
+            uint8_t *e = edge.mutableBytes;
+            for (size_t p = 0; p < n; p++) e[p] = MAX(e[p], MIN(grownMask[p], front[p]));
+        }
         CGImageRef maskImage = AUGrayImage(edge.bytes, side, side);
         CGContextRef layer = CGBitmapContextCreate(NULL, cw, ch, 8, 0, rgb, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
         CGContextSetInterpolationQuality(layer, kCGInterpolationHigh);
@@ -825,7 +872,7 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         AUSceneLayer *sceneLayer = [AUSceneLayer new];
         sceneLayer.image = [UIImage imageWithCGImage:made];
         CGImageRelease(made);
-        sceneLayer.depth = depthMap ? medianDepth(depthMap.bytes, mask.bytes, n, NO) : 0.8;
+        sceneLayer.depth = [ordered[index][0] doubleValue];
         [layers addObject:sceneLayer];
     }
     CGColorSpaceRelease(rgb);

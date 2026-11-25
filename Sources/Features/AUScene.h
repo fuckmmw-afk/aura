@@ -20,7 +20,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL inpainted;                         // painted by the model, not the quick fallback
 // Everything moves by its depth around the background's median c: a point at depth d shifts by tilt x motion x side
 // x factor, factor = (d - c) x 2, so the near goes with the tilt and the far against it. The background bends so per
-// pixel (its depth is smooth, nothing tears; factor kept within -0.7...0.7); every object moves whole at its own
+// pixel (its depth is smooth, nothing tears; factor kept within -0.6...0.6); every object moves whole at its own
 // median depth, at least 0.3 so each visibly steps forward of what is behind it.
 - (double)weightOf:(AUSceneLayer *)layer;
 - (double)plateFactorOf:(double)depth;

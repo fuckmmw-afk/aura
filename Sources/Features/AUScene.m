@@ -7,7 +7,7 @@ static NSString *const kVersion = @"scene-v2";
 @end
 
 const double AUSceneMotion = 0.08;
-static const double kPlateLimit = 0.7, kObjectLeast = 0.3;
+static const double kPlateLimit = 0.6, kObjectLeast = 0.3;
 
 @implementation AUScene {
     NSMapTable<UIImage *, UIImage *> *_squares;
