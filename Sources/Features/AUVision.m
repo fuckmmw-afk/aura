@@ -211,10 +211,24 @@ static uint8_t *instanceMask(VNInstanceMaskObservation *observation, NSUInteger 
     NSError *e = nil;
     CVPixelBufferRef mask = [observation generateScaledMaskForImageForInstances:[NSIndexSet indexSetWithIndex:index]
                                                              fromRequestHandler:handler error:&e];
-    if (!mask) return NULL;
+    if (!mask) {
+        static NSUInteger told;
+        if (told++ < 10) AULog(@"vision: no mask for instance %lu: %@", (unsigned long)index, e.localizedDescription ?: @"?");
+        return NULL;
+    }
     size_t w = CVPixelBufferGetWidth(mask), h = CVPixelBufferGetHeight(mask);
     uint8_t *bytes = NULL;
-    if ((!*mw || (w == *mw && h == *mh)) && CVPixelBufferGetPixelFormatType(mask) == kCVPixelFormatType_OneComponent32Float) {
+    OSType format = CVPixelBufferGetPixelFormatType(mask);
+    if ((!*mw || (w == *mw && h == *mh)) && format == kCVPixelFormatType_OneComponent8) {
+        *mw = w;
+        *mh = h;
+        bytes = malloc(w * h);
+        CVPixelBufferLockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
+        const uint8_t *base = CVPixelBufferGetBaseAddress(mask);
+        size_t row = CVPixelBufferGetBytesPerRow(mask);
+        for (size_t y = 0; y < h; y++) memcpy(bytes + y * w, base + y * row, w);
+        CVPixelBufferUnlockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
+    } else if ((!*mw || (w == *mw && h == *mh)) && format == kCVPixelFormatType_OneComponent32Float) {
         *mw = w;
         *mh = h;
         bytes = malloc(w * h);
@@ -226,6 +240,10 @@ static uint8_t *instanceMask(VNInstanceMaskObservation *observation, NSUInteger 
             bytes = NULL;
         }
         CVPixelBufferUnlockBaseAddress(mask, kCVPixelBufferLock_ReadOnly);
+    }
+    if (!bytes) {
+        static NSUInteger told;
+        if (told++ < 10) AULog(@"vision: instance mask %zux%zu format %.4s not taken (want %zux%zu)", w, h, (const char *)&(OSType){CFSwapInt32HostToBig(format)}, *mw, *mh);
     }
     CVPixelBufferRelease(mask);
     return bytes;
@@ -506,6 +524,11 @@ static NSArray<NSData *> *objectMasks(CGImageRef image, BOOL peopleOnly, size_t 
             for (size_t i = 0; i < mw * mh; i++) one[i] = sg_curve[one[i]];
             [subjects addObject:[NSData dataWithBytesNoCopy:one length:mw * mh freeWhenDone:YES]];
         }
+    }
+    static NSUInteger told;
+    if (told++ < 40) {
+        AULog(@"vision: %lu subjects, %lu people (person request %@, %lu results)", (unsigned long)subjects.count,
+              (unsigned long)people.count, person ? @"ran" : @"missing", (unsigned long)person.results.count);
     }
     *outW = mw;
     *outH = mh;
