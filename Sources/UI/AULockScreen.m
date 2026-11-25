@@ -154,7 +154,8 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     l.backgroundRect = CGRectMake(-(double)margin, -(double)margin, baseSize.width, baseSize.height);
     if (l.moving) {
         CGRect canvas = CGRectMake(l.picture.origin.x, top, side, side);
-        l.factors = AUScenePlateFactors(scene, (size_t)size.width, (size_t)size.height, canvas, side * 0.12);
+        // The carried-out rows are streaks: bent by the depth along the edge they would wave, so they barely move.
+        l.factors = AUScenePlateFactors(scene, (size_t)size.width, (size_t)size.height, canvas, side * 0.05);
     }
     for (AUSceneLayer *object in scene.layers) {
         if (l.count >= 8) break;
