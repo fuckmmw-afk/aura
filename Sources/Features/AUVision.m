@@ -763,14 +763,33 @@ static NSArray<NSData *> *depthParts(NSData *mask, const uint8_t *depth, size_t 
     double valley = (hist[cut] + hist[cut + 1] + (cut > 0 ? hist[cut - 1] : hist[cut])) / 3;
     if (gap < 0.15 || valley > 0.3 * MIN(peakFar, peakNear)) return @[mask];
     double threshold = (cut + 1.0) / kBins * 255;
+    // The near part, hard, then closed and opened (a 25th of the side): no islands of one part left in the other —
+    // a cheek whose depth dips is not handed to the person behind — and the seam softened a little.
+    size_t side = (size_t)lround(sqrt((double)n));
+    NSMutableData *a = [NSMutableData dataWithLength:n], *b = [NSMutableData dataWithLength:n];
+    uint8_t *pa = a.mutableBytes;
+    for (size_t i = 0; i < n; i++) pa[i] = m[i] >= 128 && depth[i] >= threshold ? 255 : 0;
+    vImage_Buffer ab = {pa, side, side, side}, bb = {b.mutableBytes, side, side, side};
+    uint32_t k = (uint32_t)(side / 25) | 1;
+    vImageMax_Planar8(&ab, &bb, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    vImageMin_Planar8(&bb, &ab, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    vImageMin_Planar8(&ab, &bb, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    vImageMax_Planar8(&bb, &ab, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    uint32_t soft = (uint32_t)(side / 160) | 1;
+    vImageTentConvolve_Planar8(&ab, &bb, NULL, 0, 0, soft, soft, 0, kvImageEdgeExtend);
+    const uint8_t *t = b.bytes;
     NSMutableData *farMask = [NSMutableData dataWithLength:n], *nearMask = [NSMutableData dataWithLength:n];
     uint8_t *f = farMask.mutableBytes, *ne = nearMask.mutableBytes;
+    double nearArea = 0, farArea = 0;
     for (size_t i = 0; i < n; i++) {
-        double t = MAX(0.0, MIN(1.0, (depth[i] - threshold) / 16 + 0.5));
-        t = t * t * (3 - 2 * t);
-        ne[i] = (uint8_t)lround(m[i] * t);
+        ne[i] = (uint8_t)((m[i] * t[i] + 127) / 255);
         f[i] = (uint8_t)(m[i] - ne[i]);
+        nearArea += ne[i] >= 128;
+        farArea += f[i] >= 128;
     }
+    if (nearArea < total * 0.12 || farArea < total * 0.12) return @[mask];
+    wf = farArea;
+    wn = nearArea;
     AULog(@"scene: an object split by depth at %.2f (parts %.0f%% / %.0f%%, %.2f apart)", threshold / 255, 100 * wf / total, 100 * wn / total, gap);
     return @[farMask, nearMask];
 }
@@ -916,18 +935,8 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     NSMutableArray<NSArray *> *ordered = [NSMutableArray array];
     for (NSData *mask in masks) [ordered addObject:@[@(depthMap ? medianDepth(depthMap.bytes, mask.bytes, n, NO) : 0.8), mask]];
     [ordered sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) { return [a[0] compare:b[0]]; }];
-    // Where an object meets a nearer one, it carries a band of the cover from under that one: when the two part a
-    // little, the cover shows in the seam, not the painted room behind them both.
-    NSMutableArray<NSData *> *nearer = [NSMutableArray array];
-    for (NSUInteger i = 0; i < ordered.count; i++) {
-        NSMutableData *front = [NSMutableData dataWithLength:n];
-        uint8_t *f = front.mutableBytes;
-        for (NSUInteger j = i + 1; j < ordered.count; j++) {
-            const uint8_t *m = [ordered[j][1] bytes];
-            for (size_t p = 0; p < n; p++) if (m[p] > f[p]) f[p] = m[p];
-        }
-        [nearer addObject:front];
-    }
+    // Where two objects part, the painted room behind them shows in the seam (a band of the cover there would be a
+    // ghost copy of the nearer one).
     CGColorSpaceRef rgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     for (NSUInteger index = 0; index < ordered.count; index++) {
         NSData *mask = ordered[index][1];
@@ -937,13 +946,6 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         uint32_t pull = (uint32_t)(side / 320) | 1, soften = (uint32_t)(side / 110) | 1;
         vImageMin_Planar8(&mb, &rb, NULL, 0, 0, pull, pull, kvImageEdgeExtend);
         vImageTentConvolve_Planar8(&rb, &eb, NULL, 0, 0, soften, soften, 0, kvImageEdgeExtend);
-        if (index + 1 < ordered.count) {
-            uint32_t reach = (uint32_t)(side / 40) | 1;
-            vImageMax_Planar8(&mb, &rb, NULL, 0, 0, reach, reach, kvImageEdgeExtend);
-            const uint8_t *grownMask = eroded.bytes, *front = nearer[index].bytes;
-            uint8_t *e = edge.mutableBytes;
-            for (size_t p = 0; p < n; p++) e[p] = MAX(e[p], MIN(grownMask[p], front[p]));
-        }
         CGImageRef maskImage = AUGrayImage(edge.bytes, side, side);
         CGContextRef layer = CGBitmapContextCreate(NULL, cw, ch, 8, 0, rgb, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
         CGContextSetInterpolationQuality(layer, kCGInterpolationHigh);
