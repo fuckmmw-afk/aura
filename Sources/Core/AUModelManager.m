@@ -348,7 +348,11 @@ static const NSTimeInterval kIdleUnload = 300;
     // LaMa on the CPU: for the Neural Engine it took minutes to compile, seconds to load each time and over a
     // gigabyte; at 256 px on the CPU it loads at once and stays small. The rest on CPU and Neural Engine (the GPU is
     // not there for a backgrounded app, which is when a locked phone moves to the next track).
-    configuration.computeUnits = [modelID isEqualToString:AUModelInpaint] ? MLComputeUnitsCPUOnly : MLComputeUnitsCPUAndNeuralEngine;
+    // LaMa: CPU (the Neural Engine compiles it for minutes); SAM's point and mask parts: CPU + GPU (the Neural Engine
+    // cannot place their transposed convolution's shape).
+    if ([modelID isEqualToString:AUModelInpaint]) configuration.computeUnits = MLComputeUnitsCPUOnly;
+    else if ([modelID isEqualToString:AUModelSamDecoder] || [modelID isEqualToString:AUModelSamPrompt]) configuration.computeUnits = MLComputeUnitsCPUAndGPU;
+    else configuration.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
     NSError *error = nil;
     model = [MLModel modelWithContentsOfURL:[self compiledURL:entry] configuration:configuration error:&error];
     if (!model) {

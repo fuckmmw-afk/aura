@@ -79,11 +79,11 @@ NSArray<AUTuneSection *> *AUTuneSections(void) {
             ]),
             section(@"Объекты", @"Сцены собираются заново.", @[
                 item(@"sam", @"Искать все объекты (SAM)", @"Каждая овечка, дерево, стул — отдельный слой", 1, 0, 1, 1, AUTuneSwitch, AUTuneScene),
-                item(@"maxObjects", @"Максимум объектов", nil, 14, 1, 24, 1, AUTuneCount, AUTuneScene),
+                item(@"maxObjects", @"Максимум объектов", nil, 16, 1, 24, 1, AUTuneCount, AUTuneScene),
                 item(@"samGrid", @"Точек поиска", @"Сетка N×N по обложке: больше — мельче объекты, дольше", 8, 3, 16, 1, AUTuneCount, AUTuneScene),
-                item(@"samScore", @"Уверенность модели", nil, 0.75, 0.3, 0.98, 0.01, AUTunePercent, AUTuneScene),
-                item(@"samStability", @"Стабильность маски", nil, 0.85, 0.3, 0.99, 0.01, AUTunePercent, AUTuneScene),
-                item(@"samContrast", @"Выступ по глубине", @"Насколько объект должен быть ближе своего окружения; 0 — брать всё", 0.035, 0, 0.3, 0.005, AUTunePlain, AUTuneScene),
+                item(@"samScore", @"Уверенность модели", nil, 0.65, 0.3, 0.98, 0.01, AUTunePercent, AUTuneScene),
+                item(@"samStability", @"Стабильность маски", nil, 0.80, 0.3, 0.99, 0.01, AUTunePercent, AUTuneScene),
+                item(@"samContrast", @"Выступ по глубине", @"Насколько объект должен быть ближе своего окружения; 0 — брать всё", 0.025, 0, 0.3, 0.005, AUTunePlain, AUTuneScene),
                 item(@"samMinArea", @"Минимальный размер", nil, 0.003, 0.0005, 0.05, 0.0005, AUTunePercent, AUTuneScene),
                 item(@"samMaxArea", @"Максимальный размер", nil, 0.30, 0.05, 0.8, 0.01, AUTunePercent, AUTuneScene),
                 item(@"visionObjects", @"Объекты Vision", @"Люди и главный объект от системы", 6, 0, 12, 1, AUTuneCount, AUTuneScene),
@@ -92,7 +92,7 @@ NSArray<AUTuneSection *> *AUTuneSections(void) {
                 item(@"edgePull", @"Подрезка краёв", @"Насколько края объекта поджаты внутрь", 0.3, 0, 2, 0.05, AUTunePlain, AUTuneScene),
                 item(@"holeGrow", @"Запас под дорисовку", @"На сколько дорисовываемая область шире объекта (% стороны)", 3.1, 0.5, 10, 0.1, AUTunePlain, AUTuneScene),
                 item(@"reliefSmooth", @"Сглаживание рельефа", @"Радиус в процентах стороны: больше — объекты гладче, меньше растяжений", 6.2, 0.5, 20, 0.1, AUTunePlain, AUTuneScene),
-                item(@"extension", @"Дорисовка вниз", @"Сколько картинки LaMa дорисовывает под обложкой (доля стороны); 0 — не дорисовывать", 0.35, 0, 0.6, 0.01, AUTunePercent, AUTuneScene),
+                item(@"extension", @"Дорисовка вниз", @"Сколько картинки LaMa дорисовывает под обложкой (доля стороны); 0 — не дорисовывать", 0.5, 0, 0.6, 0.01, AUTunePercent, AUTuneScene),
             ]),
         ];
     });
