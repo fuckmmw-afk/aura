@@ -55,7 +55,7 @@ static NSString *trackURIOf(NSDictionary *info) {
 static NSString *pictureKeyOf(UIImage *image) {
     CGImageRef cg = image.CGImage;
     if (!cg) return nil;
-    const size_t side = 32;
+    enum { side = 32 };
     uint8_t pixels[side * side * 4];
     memset(pixels, 0, sizeof(pixels));
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
@@ -78,7 +78,7 @@ static NSData *thumbOf(UIImage *image) {
     if (!cg) return nil;
     NSMutableData *data = [NSMutableData dataWithLength:16 * 16];
     CGColorSpaceRef space = CGColorSpaceCreateDeviceGray();
-    CGContextRef c = CGBitmapContextCreate(data.mutableBytes, 16, 16, 8, 16, space, kCGImageAlphaNone);
+    CGContextRef c = CGBitmapContextCreate(data.mutableBytes, 16, 16, 8, 16, space, (CGBitmapInfo)kCGImageAlphaNone);
     CGColorSpaceRelease(space);
     if (!c) return nil;
     CGContextSetInterpolationQuality(c, kCGInterpolationMedium);
