@@ -3,6 +3,7 @@
 #import "Core/AUModelManager.h"
 #import "Core/AUTune.h"
 #import "Core/AUTaurus.h"
+#import "Core/AUYandex.h"
 #import "Features/AUPipeline.h"
 #import "UI/AULockScreen.h"
 
@@ -65,7 +66,7 @@ static UIViewController *tunePage(void) {
     resetRow.color = UIColor.systemRedColor;
     ADD(reset, resetRow);
     ADD(sections, AUSection(nil, reset, @"Ползунок «Сила параллакса» на главной странице умножает размах поворота в плеере и на экране блокировки."));
-    return [[NSClassFromString(@"SGModPage") alloc] initWithTitle:@"Тонкая настройка" intro:nil sections:sections footer:nil];
+    return AUMakePage(@"Тонкая настройка", nil, sections, nil);
 }
 
 UIViewController *AUSettingsPage(void) {
@@ -80,9 +81,10 @@ UIViewController *AUSettingsPage(void) {
         warning.symbol = @"exclamationmark.triangle.fill";
         ADD(cover, warning);
     }
-    SGModRow *theme = AURowSwitch(@"Тема под трек", @"Стекло, кнопки и ползунок перетекают в цвета обложки", AUKeyTheme);
+    BOOL yandex = AUHostYandex();
+    SGModRow *theme = AURowSwitch(@"Тема под трек", yandex ? @"Стекло перетекает в цвета обложки" : @"Стекло, кнопки и ползунок перетекают в цвета обложки", AUKeyTheme);
     theme.changed = ^(BOOL on) {
-        if (on && !AUTaurusFollowsCover()) AUTaurusSetSwitch(AUTaurusKeyFollowsCover, YES);
+        if (on && !yandex && !AUTaurusFollowsCover()) AUTaurusSetSwitch(AUTaurusKeyFollowsCover, YES);
         AUSettingsChanged();
     };
     ADD(cover, AURowSymbol(theme, @"paintpalette.fill"));
@@ -113,13 +115,14 @@ UIViewController *AUSettingsPage(void) {
     SGModRow *upscale = AURowSwitch(@"Апскейл обложек", @"Обложки меньше 600 px дотягиваются нейросетью", AUKeyUpscale);
     upscale.changed = ^(BOOL on) { AUSettingsChanged(); };
     ADD(cover, AURowSymbol(upscale, @"arrow.up.left.and.arrow.down.right"));
-    ADD(sections, AUSection(@"Обложка и тема", cover, kRestart));
+    ADD(sections, AUSection(@"Обложка и тема", cover, yandex ? @"Переключатели работают сразу. Эффекты — на обложке в полноэкранном плеере." : kRestart));
 
     NSMutableArray *lock = [NSMutableArray array];
     SGModRow *lockRow = AURowChoice(@"Обложка на экране блокировки", nil, AUKeyLockScreen, @[@"3D-облёт", @"Растянуть", @"Выкл"], 0);
     lockRow.chosen = ^(NSInteger index) { AUSettingsChanged(); };
     ADD(lock, AURowSymbol(lockRow, @"lock.iphone"));
-    ADD(sections, AUSection(@"Экран блокировки", lock, @"iOS 26+. Обложка на весь экран блокировки. «3D-облёт» — зацикленное видео: камера медленно ходит над картой глубины, артист впереди (гироскопа на локскрине нет). Заменяет стиль экрана блокировки Taurus."));
+    ADD(sections, AUSection(@"Экран блокировки", lock, !yandex ? @"iOS 26+. Обложка на весь экран блокировки. «3D-облёт» — зацикленное видео: камера медленно ходит над картой глубины, артист впереди (гироскопа на локскрине нет)."
+                                                                       " Заменяет стиль экрана блокировки Taurus." : @"iOS 26+. Обложка на весь экран блокировки. «3D-облёт» — зацикленное видео: камера медленно ходит над картой глубины, артист впереди (гироскопа на локскрине нет)."));
 
     NSMutableArray *models = [NSMutableArray array];
     ADD(models, modelRow(AUModelDepth, @"глубина"));
@@ -150,7 +153,7 @@ UIViewController *AUSettingsPage(void) {
     ADD(stats, AURowStat(@"Из них дорисовка LaMa", ^NSString *{ return AUStatText(@"inpaint"); }));
     ADD(stats, AURowStat(@"Апскейл", ^NSString *{ return AUStatText(@"upscale"); }));
     ADD(stats, AURowStat(@"Загрузка модели глубины", ^NSString *{ return AUStatText(@"load." AUModelDepth); }));
-    ADD(stats, AURowStat(@"Память Spotify", ^NSString *{ return [NSString stringWithFormat:@"%@ (пик %@)", AUBytes(AUFootprint()), AUBytes(AUPeakFootprint())]; }));
+    ADD(stats, AURowStat([@"Память " stringByAppendingString:AUHostName()], ^NSString *{ return [NSString stringWithFormat:@"%@ (пик %@)", AUBytes(AUFootprint()), AUBytes(AUPeakFootprint())]; }));
     ADD(stats, AURowStat(@"Температура", ^NSString *{ return AUThermalName(); }));
     SGModRow *thermal = AURowOption(@"Пауза при перегреве", @"При «горячем» телефоне оставлять только палитру", AUKeyThermalPause);
     thermal.changed = ^(BOOL on) {
@@ -161,8 +164,8 @@ UIViewController *AUSettingsPage(void) {
     ADD(stats, AURowAction(@"Поделиться логом", @"Documents/Aura/aura.log, в нём строка телеметрии раз в минуту", ^{ AUShareFile(AULogURL()); }));
     ADD(sections, AUSection(@"Диагностика", stats, nil));
 
-    NSString *footer = [NSString stringWithFormat:@"Aura %s — отдельный аддон к Taurus, ничего в Taurus не меняет.\nTaurus © Vojtěch Škopek (spoti.pw), PolyForm Strict 1.0.0.\nDepth Anything V2 — Apache-2.0, Real-ESRGAN — BSD-3-Clause, Big-LaMa — Apache-2.0, SAM 2.1 — Apache-2.0.", AURA_VERSION];
-    return [[NSClassFromString(@"SGModPage") alloc] initWithTitle:@"Aura" intro:nil sections:sections footer:footer];
+    NSString *footer = yandex ? [NSString stringWithFormat:@"Aura %s для Яндекс Музыки. Открыть эту страницу из плеера — удержать обложку двумя пальцами.\nDepth Anything V2 — Apache-2.0, Real-ESRGAN — BSD-3-Clause, Big-LaMa — Apache-2.0, SAM 2.1 — Apache-2.0.", AURA_VERSION] : [NSString stringWithFormat:@"Aura %s — отдельный аддон к Taurus, ничего в Taurus не меняет.\nTaurus © Vojtěch Škopek (spoti.pw), PolyForm Strict 1.0.0.\nDepth Anything V2 — Apache-2.0, Real-ESRGAN — BSD-3-Clause, Big-LaMa — Apache-2.0, SAM 2.1 — Apache-2.0.", AURA_VERSION];
+    return AUMakePage(@"Aura", nil, sections, footer);
 }
 
 NSArray *AUSettingsWithAuraRow(NSArray *sections) {

@@ -1,4 +1,4 @@
-// Taurus, as Aura reaches it: by the C functions and classes its dylib exports, looked up at run time.
+// Aura's host. Taurus, as Aura reaches it: by the C functions and classes its dylib exports, looked up at run time.
 // Nothing of Taurus is linked, copied or changed; when a symbol is missing the feature that needs it stays off.
 #import <UIKit/UIKit.h>
 
@@ -19,6 +19,13 @@ void AUTaurusSetCoverAccent(UIColor *color);
 #define AUTaurusKeyFollowsCover @"spotifyglass.redesign.player.followsCover"
 void AUTaurusSetSwitch(NSString *key, BOOL on);
 void AUTaurusRestart(void);
+// The lock screen's extras on the now playing info under `owner` (Taurus's NowPlayingExtras; Yandex: Aura's own merge).
+void AUTaurusSetExtras(NSString *owner, NSDictionary *_Nullable extras, NSString *_Nullable title);
+BOOL AUTaurusCanSetExtras(void);
+// "Spotify" or "Яндекс Музыки", for the settings' texts.
+NSString *AUHostName(void);
+// A settings page: Taurus's SGModPage on Spotify, Aura's own (UI/AUOwnPage) elsewhere.
+UIViewController *AUMakePage(NSString *title, NSString *_Nullable intro, NSArray *sections, NSString *_Nullable footer);
 
 #pragma mark - the player
 

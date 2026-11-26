@@ -19,6 +19,17 @@ Models are not inside the dylib: the phone fetches them on first use from a mode
 see `scripts/publish_model.py`), compiles them once and keeps them in Application Support. Results are cached per cover.
 Settings: Taurus's Mod Settings → **Aura**.
 
+## Yandex Music
+
+The same dylib also runs inside Yandex Music (`ru.yandex.mobile.music`, checked on 8.22), where there is no Taurus:
+
+- the track and its cover come from the now playing info the app gives `MPNowPlayingInfoCenter` (a bigger copy of
+  the same picture from the player's carousel replaces a small one); `Sources/Core/AUYandex.m`;
+- the scene goes onto the centred cover of the player's carousel (`PlayerArtworkView` → its collection view's cells);
+- the lock screen's 3:4 clip is merged into the app's now playing info while it is about the same track;
+- settings are Aura's own page (`Sources/UI/AUOwnPage.m`): a button under Yandex's settings table, or two fingers held
+  on the player's cover.
+
 ## Build
 
 GitHub Actions (`.github/workflows/build.yml`) on a macOS runner with Theos. Secrets:

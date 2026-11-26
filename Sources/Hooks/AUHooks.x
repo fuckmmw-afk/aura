@@ -3,6 +3,8 @@
 #import "Core/AUCore.h"
 #import "Core/AUModelManager.h"
 #import "Core/AUTaurus.h"
+#import "Core/AUYandex.h"
+#import <MediaPlayer/MediaPlayer.h>
 #import "Features/AUPipeline.h"
 #import "UI/AUCoverEffects.h"
 #import "UI/AULockScreen.h"
@@ -60,8 +62,88 @@
 %end
 %end
 
+// Yandex Music: the player's cover carousel, its settings screens and the now playing info it hands iOS.
+%group YandexPlayer
+%hook _TtC23MusicPlayerLandingMaple17PlayerArtworkView
+- (void)layoutSubviews {
+    %orig;
+    AUYandexArtworkViewLaidOut((UIView *)self);
+}
+%end
+%end
+
+%group YandexCell
+%hook _TtC23MusicPlayerLandingMaple31PlayerArtworkCollectionViewCell
+- (void)layoutSubviews {
+    %orig;
+    AUYandexArtworkCellLaidOut((UIView *)self);
+}
+- (void)applyLayoutAttributes:(UICollectionViewLayoutAttributes *)attributes {
+    %orig;
+    AUYandexArtworkCellLaidOut((UIView *)self);
+}
+%end
+%end
+
+%group YandexNowPlaying
+%hook MPNowPlayingInfoCenter
+- (void)setNowPlayingInfo:(NSDictionary *)info {
+    %orig(AUYandexNowPlayingWillSet(self, info));
+}
+%end
+%end
+
+%group YandexSettings
+%hook _TtC16MusicLegacyMaple24YPSettingsViewController
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    AUYandexSettingsAppeared((UIViewController *)self);
+}
+%end
+%end
+
+%group YandexSettingsCommon
+%hook _TtC16MusicLegacyMaple28SettingsCommonViewController
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    AUYandexSettingsAppeared((UIViewController *)self);
+}
+%end
+%end
+
+static void initGlass(void) {
+    if (NSClassFromString(@"UIGlassEffect")) %init(Glass);
+}
+
+static void startYandex(double started) {
+    AUSystemStart();
+    %init(YandexNowPlaying);
+    AUYandexStart();
+    [AUPipeline.shared start];
+    if (NSClassFromString(@"_TtC23MusicPlayerLandingMaple17PlayerArtworkView")) {
+        %init(YandexPlayer);
+        if (NSClassFromString(@"_TtC23MusicPlayerLandingMaple31PlayerArtworkCollectionViewCell")) %init(YandexCell);
+        else AULog(@"no PlayerArtworkCollectionViewCell: covers are found on the artwork view's layout only");
+        AUCoverEffectsStart();
+    } else {
+        AULog(@"no PlayerArtworkView in this Yandex Music: no cover effects");
+    }
+    if (NSClassFromString(@"_TtC16MusicLegacyMaple24YPSettingsViewController")) %init(YandexSettings);
+    if (NSClassFromString(@"_TtC16MusicLegacyMaple28SettingsCommonViewController")) %init(YandexSettingsCommon);
+    initGlass();
+    AUThemeStart();
+    AULockScreenStart();
+    NSString *version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    AULog(@"Aura %s started in Yandex Music %@ in %.1f ms on iOS %@, footprint %@, models from %@", AURA_VERSION, version, AUNowMs() - started,
+          UIDevice.currentDevice.systemVersion, AUBytes(AUFootprint()), AUModelManager.shared.serverConfigured ? @"the server" : @"nowhere (no URL in this build)");
+}
+
 static void start(void) {
     double started = AUNowMs();
+    if (AUHostYandex()) {
+        startYandex(started);
+        return;
+    }
     if (!AUTaurusPresent()) {
         AULog(@"Aura %s: Taurus (spotifyglass) not found, staying off. Missing: %@", AURA_VERSION, AUTaurusMissing());
         return;
@@ -92,7 +174,7 @@ static void start(void) {
     } else {
         AULog(@"no SGRArtworkField in Taurus: no effects on the Fill background");
     }
-    if (NSClassFromString(@"UIGlassEffect")) %init(Glass);
+    initGlass();
     AUThemeStart();
     AULockScreenStart();
     AULog(@"Aura %s started in %.1f ms on iOS %@, footprint %@, models from %@", AURA_VERSION, AUNowMs() - started,

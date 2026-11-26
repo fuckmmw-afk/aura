@@ -17,6 +17,8 @@ NS_ASSUME_NONNULL_BEGIN
 void AUCoverEffectsStart(void);
 void AUCoverEffectsTiltLaidOut(UIView *tilt);
 void AUCoverEffectsFieldLaidOut(UIView *field);
+// A host without Taurus (Yandex Music) names its cover itself: `cover` is the picture, `holder` the view it lies in.
+void AUCoverEffectsCoverFound(UIView *holder, UIView *cover);
 UIView *_Nullable AUCoverEffectsPlayerRoot(void);
 
 NS_ASSUME_NONNULL_END

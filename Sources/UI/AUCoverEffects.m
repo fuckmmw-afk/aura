@@ -1,6 +1,7 @@
 #import "AUCoverEffects.h"
 #import "Core/AUCore.h"
 #import "Core/AUTaurus.h"
+#import "Core/AUYandex.h"
 #import "Features/AUPipeline.h"
 #import "Core/AUTune.h"
 #import "Features/AUScene3D.h"
@@ -38,10 +39,18 @@ typedef NS_ENUM(NSInteger, AUSurfaceKind) {
 @implementation AUSurface
 @end
 
+@interface AUWeakCover : NSObject
+@property (nonatomic, weak) UIView *view;
+@end
+
+@implementation AUWeakCover
+@end
+
 @interface AUCoverEffects : NSObject
 + (instancetype)shared;
 - (void)tiltLaidOut:(UIView *)tilt;
 - (void)fieldLaidOut:(UIView *)field;
+- (void)holder:(UIView *)holder laidOutCover:(UIView *)cover;
 @property (nonatomic, weak, readonly) UIView *playerRoot;
 @end
 
@@ -55,6 +64,10 @@ void AUCoverEffectsTiltLaidOut(UIView *tilt) {
 
 void AUCoverEffectsFieldLaidOut(UIView *field) {
     [[AUCoverEffects shared] fieldLaidOut:field];
+}
+
+void AUCoverEffectsCoverFound(UIView *holder, UIView *cover) {
+    [[AUCoverEffects shared] holder:holder laidOutCover:cover];
 }
 
 UIView *AUCoverEffectsPlayerRoot(void) {
@@ -209,7 +222,15 @@ static BOOL inCoverCell(UIView *tilt) {
     return NO;
 }
 
+static char kNamedCoverKey;
+
+static UIView *namedCover(UIView *holder) {
+    return ((AUWeakCover *)objc_getAssociatedObject(holder, &kNamedCoverKey)).view;
+}
+
 static UIView *coverIn(UIView *tilt) {
+    UIView *named = namedCover(tilt);
+    if (named) return named.superview == tilt ? named : nil;
     for (UIView *sub in tilt.subviews) {
         NSString *name = NSStringFromClass(sub.class);
         if ([name hasPrefix:@"SGR"] || [name hasPrefix:@"AU"]) continue;
@@ -253,6 +274,21 @@ static UIView *taurusField(void) {
     [_tilts addObject:tilt];
     if (tilt == _tilt) [self layoutCover];
     UIScrollView *list = listOf(tilt);
+    if ((list.isDragging || list.isDecelerating) && _wantPlane) [self startLink];
+    [self schedulePick];
+}
+
+- (void)holder:(UIView *)holder laidOutCover:(UIView *)cover {
+    if (cover.bounds.size.width < kCoverMinWidth) return;
+    if (namedCover(holder) != cover) {
+        AUWeakCover *box = [AUWeakCover new];
+        box.view = cover;
+        objc_setAssociatedObject(holder, &kNamedCoverKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (holder == _tilt) [self schedulePick];
+    }
+    [_tilts addObject:holder];
+    if (holder == _tilt) [self layoutCover];
+    UIScrollView *list = listOf(holder);
     if ((list.isDragging || list.isDecelerating) && _wantPlane) [self startLink];
     [self schedulePick];
 }
@@ -432,7 +468,8 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     else [_plane.layer addSublayer:_coverSurface.objects];
     [_cover addSubview:_plane];
     [_tilt addSubview:_subjectHost];
-    _tilt.clipsToBounds = NO;
+    // (Yandex rounds its cover by its holder's clipping: that is left alone unless the objects step out.)
+    if (!AUHostYandex() || AUFlag(AUKeyPopOut)) _tilt.clipsToBounds = NO;
     _coverSurface.attached = YES;
     _coverSurface.content = nil;
     [self layoutCover];

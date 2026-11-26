@@ -507,8 +507,8 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
     _partialFor = nil;
     _offeredFor = offer;
     _offers++;
-    void (*setExtras)(NSString *, NSDictionary *, NSString *) = (void (*)(NSString *, NSDictionary *, NSString *))dlsym(RTLD_DEFAULT, "SGNowPlayingSetExtras");
-    if (!setExtras) {
+    void (*setExtras)(NSString *, NSDictionary *, NSString *) = AUTaurusSetExtras;
+    if (!AUTaurusCanSetExtras()) {
         AULog(@"lock screen: Taurus's now playing extras are missing");
         return;
     }

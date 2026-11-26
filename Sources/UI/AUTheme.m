@@ -3,6 +3,7 @@
 #import "Core/AUCompat.h"
 #import "Core/AUCore.h"
 #import "Core/AUTaurus.h"
+#import "Core/AUYandex.h"
 #import "Features/AUPipeline.h"
 #import <objc/runtime.h>
 
@@ -198,7 +199,7 @@ static void follow(AUArtwork *artwork, BOOL force) {
 void AUThemeStart(void) {
     // The buttons follow the cover through Taurus's own switch: turned on once for the theme, unless it was ever set.
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    if (themeOn() && ![defaults objectForKey:AUTaurusKeyFollowsCover] && ![defaults boolForKey:@"aura.followsCoverSet"]) {
+    if (themeOn() && !AUHostYandex() && ![defaults objectForKey:AUTaurusKeyFollowsCover] && ![defaults boolForKey:@"aura.followsCoverSet"]) {
         AUTaurusSetSwitch(AUTaurusKeyFollowsCover, YES);
         [defaults setBool:YES forKey:@"aura.followsCoverSet"];
         AULog(@"theme: Taurus's Follow the cover switched on for the buttons; it takes over from the next launch");
