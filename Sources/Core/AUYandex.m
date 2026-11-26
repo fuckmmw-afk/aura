@@ -40,11 +40,14 @@ static __weak MPMediaItemArtwork *sg_artwork;
 static NSString *trackURIOf(NSDictionary *info) {
     NSString *title = info[MPMediaItemPropertyTitle];
     if (![title isKindOfClass:NSString.class] || !title.length) return nil;
+    // The content id as the app gives it, with the names: whatever that id stands for (a track or the queue it plays
+    // from), another song is another URI.
     id external = info[MPNowPlayingInfoPropertyExternalContentIdentifier];
-    if ([external isKindOfClass:NSString.class] && [external length]) return [@"ym:" stringByAppendingString:external];
+    NSString *id_ = [external isKindOfClass:NSString.class] ? external : [external isKindOfClass:NSNumber.class] ? [external stringValue] : @"";
     NSString *artist = [info[MPMediaItemPropertyArtist] isKindOfClass:NSString.class] ? info[MPMediaItemPropertyArtist] : @"";
     NSString *album = [info[MPMediaItemPropertyAlbumTitle] isKindOfClass:NSString.class] ? info[MPMediaItemPropertyAlbumTitle] : @"";
-    return [@"ym:" stringByAppendingString:[AUSHA1([NSString stringWithFormat:@"%@\n%@\n%@", title, artist, album]) substringToIndex:20]];
+    NSString *names = [AUSHA1([NSString stringWithFormat:@"%@\n%@\n%@", title, artist, album]) substringToIndex:12];
+    return id_.length ? [NSString stringWithFormat:@"ym:%@:%@", id_, names] : [@"ym:" stringByAppendingString:names];
 }
 
 // The picture's own key: its pixels, read small. The same cover handed over again (the next song of an album) gives
