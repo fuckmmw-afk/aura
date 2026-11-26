@@ -6,6 +6,7 @@
 #import "Core/AUYandex.h"
 #import "Features/AUPipeline.h"
 #import "UI/AULockScreen.h"
+#import "UI/AUVideoCover.h"
 
 #define ADD(array, row) do { id _r = (row); if (_r) [(array) addObject:_r]; } while (0)
 
@@ -121,6 +122,11 @@ UIViewController *AUSettingsPage(void) {
     SGModRow *lockRow = AURowChoice(@"Обложка на экране блокировки", nil, AUKeyLockScreen, @[@"3D-облёт", @"Растянуть", @"Выкл"], 0);
     lockRow.chosen = ^(NSInteger index) { AUSettingsChanged(); };
     ADD(lock, AURowSymbol(lockRow, @"lock.iphone"));
+    if (yandex) {
+        SGModRow *video = AURowSwitch(@"Видео-обложки", @"Если у трека в Яндексе есть видео, на экране блокировки — оно, а не 3D-облёт", AUKeyLockVideo);
+        video.changed = ^(BOOL on) { AUSettingsChanged(); };
+        ADD(lock, AURowSymbol(video, @"play.rectangle.fill"));
+    }
     ADD(sections, AUSection(@"Экран блокировки", lock, !yandex ? @"iOS 26+. Обложка на весь экран блокировки. «3D-облёт» — зацикленное видео: камера медленно ходит над картой глубины, артист впереди (гироскопа на локскрине нет)."
                                                                        " Заменяет стиль экрана блокировки Taurus." : @"iOS 26+. Обложка на весь экран блокировки. «3D-облёт» — зацикленное видео: камера медленно ходит над картой глубины, артист впереди (гироскопа на локскрине нет)."));
 

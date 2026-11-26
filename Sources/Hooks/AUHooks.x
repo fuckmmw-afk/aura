@@ -10,6 +10,8 @@
 #import "UI/AULockScreen.h"
 #import "UI/AUSettings.h"
 #import "UI/AUTheme.h"
+#import "UI/AUVideoCover.h"
+#import <AVFoundation/AVFoundation.h>
 
 %group Player
 %hook _TtC35CreativeWorkCommons_CoverArtTiltKit16CoverArtTiltView
@@ -85,6 +87,24 @@
 %end
 %end
 
+// The video covers the app plays in its player (UI/AUVideoCover).
+%group YandexVideo
+%hook AVPlayer
+- (void)play {
+    %orig;
+    AUVideoCoverPlayerStarted((AVPlayer *)self);
+}
+- (void)setRate:(float)rate {
+    %orig;
+    if (rate > 0) AUVideoCoverPlayerStarted((AVPlayer *)self);
+}
+- (void)playImmediatelyAtRate:(float)rate {
+    %orig;
+    if (rate > 0) AUVideoCoverPlayerStarted((AVPlayer *)self);
+}
+%end
+%end
+
 %group YandexNowPlaying
 %hook MPNowPlayingInfoCenter
 - (void)setNowPlayingInfo:(NSDictionary *)info {
@@ -118,6 +138,7 @@ static void initGlass(void) {
 static void startYandex(double started) {
     AUSystemStart();
     %init(YandexNowPlaying);
+    %init(YandexVideo);
     AUYandexStart();
     [AUPipeline.shared start];
     if (NSClassFromString(@"_TtC23MusicPlayerLandingMaple17PlayerArtworkView")) {

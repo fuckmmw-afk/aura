@@ -180,8 +180,12 @@ static NSString *choiceValue(AUOwnRow *row) {
         UILabel *label = note.subviews.firstObject;
         CGFloat width = self.tableView.bounds.size.width;
         CGSize fit = [label sizeThatFits:CGSizeMake(width - 40, CGFLOAT_MAX)];
-        CGRect frame = CGRectMake(0, 0, width, ceil(fit.height) + 28);
-        if (!CGRectEqualToRect(note.frame, frame)) {
+        // Only the size counts: the table moves its footer down to the content's end itself (comparing the whole
+        // frame laid it out again forever — the page froze).
+        CGSize size = CGSizeMake(width, ceil(fit.height) + 28);
+        if (fabs(note.frame.size.width - size.width) > 0.5 || fabs(note.frame.size.height - size.height) > 0.5) {
+            CGRect frame = note.frame;
+            frame.size = size;
             note.frame = frame;
             label.frame = CGRectMake(20, 14, width - 40, ceil(fit.height));
             if (note == self.tableView.tableHeaderView) self.tableView.tableHeaderView = note;

@@ -11,7 +11,9 @@
 #if !TARGET_OS_MACCATALYST
 #import <MediaPlayer/MediaPlayer.h>
 #import "Core/AUTaurus.h"
+#import "Core/AUYandex.h"
 #import "Features/AUPipeline.h"
+#import "UI/AUVideoCover.h"
 #endif
 
 // (The numbers are Core/AUTune's: fps, loop, lockBoost, orbitX/Y, lockBlur, lockBlurFrom/To, lockShade, lockBitrate.)
@@ -482,6 +484,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(trackChanged) name:AUTrackDidChangeNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(settingsChanged) name:AUSettingsDidChangeNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(trackChanged) name:AUArtworkDidChangeNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(trackChanged) name:AUVideoCoverDidChangeNotification object:nil];
     dispatch_async(dispatch_get_main_queue(), ^{ [self trackChanged]; });
     return self;
 }
@@ -499,7 +502,9 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
     NSString *uri = AUTaurusTrackURI();
     NSString *title = AUTaurusTrackTitle();
     if (!uri.length || !title.length) return;
-    NSString *offer = [NSString stringWithFormat:@"%@|%ld", uri, (long)mode];
+    // A track with a video cover (Yandex Music) shows its video, not the 3D flight.
+    AVURLAsset *videoCover = AUHostYandex() && mode != 2 && AUEnabled(AUKeyLockVideo) ? AUVideoCoverFor(uri) : nil;
+    NSString *offer = [NSString stringWithFormat:@"%@|%ld|%@", uri, (long)mode, videoCover.URL.absoluteString ?: @""];
     AUArtwork *current = [AUPipeline shared].current;
     BOOL upgrade = [_partialFor isEqualToString:uri] && [current.trackURI isEqualToString:uri] && settled(current, YES);
     if ([offer isEqualToString:_offeredFor] && !upgrade) return;
@@ -523,6 +528,10 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
             static BOOL told;
             if (!told) AULog(@"lock screen: this iOS takes no 3:4 animated artwork (%@)", [supportedKeys() componentsJoinedByString:@", "]);
             told = YES;
+            return;
+        }
+        if (videoCover) {
+            [self offerVideo:videoCover uri:uri title:title key:key artworkClass:artworkClass];
             return;
         }
         BOOL moving = mode == 0;
@@ -593,6 +602,52 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
         setExtras(@"motion", @{key: artwork}, title);
         AULog(@"lock screen: %@ offered for \"%@\"", moving ? @"3D flight" : @"stretched cover", title);
     }
+}
+
+- (void)offerVideo:(AVURLAsset *)video uri:(NSString *)uri title:(NSString *)title key:(NSString *)key artworkClass:(Class)artworkClass API_AVAILABLE(ios(26.0)) {
+    CGSize size = clipSize();
+    NSURL *file = [clipFolder() URLByAppendingPathComponent:[NSString stringWithFormat:@"video-%@-%.0fx%.0f.mp4", AUSHA1(video.URL.absoluteString), size.width, size.height]];
+    __block UIImage *poster = nil;
+    __block BOOL tried = NO, ready = NO;
+    // Made once, on the clip queue; both requests wait for it there.
+    BOOL (^make)(void) = ^BOOL {
+        if (tried) return ready;
+        tried = YES;
+        ready = [NSFileManager.defaultManager fileExistsAtPath:file.path];
+        if (!ready) {
+            UIImage *first = nil;
+            ready = AUVideoCoverWrite(video, file, size, &first);
+            poster = first;
+            pruneClips();
+        }
+        if (ready && !poster) {
+            AVAssetImageGenerator *generator = [AVAssetImageGenerator assetImageGeneratorWithAsset:[AVURLAsset URLAssetWithURL:file options:nil]];
+            CGImageRef cg = [generator copyCGImageAtTime:kCMTimeZero actualTime:NULL error:nil];
+            if (cg) {
+                poster = [UIImage imageWithCGImage:cg];
+                CGImageRelease(cg);
+            }
+        }
+        return ready;
+    };
+    NSString *artworkID = [NSString stringWithFormat:@"aura-video-%@-%lu", AUSHA1(video.URL.absoluteString), (unsigned long)_offers];
+    MPMediaItemAnimatedArtwork *artwork = [[artworkClass alloc] initWithArtworkID:artworkID
+        previewImageRequestHandler:^(CGSize wanted, void (^completion)(UIImage *)) {
+            dispatch_async(clipQueue(), ^{
+                make();
+                completion(poster ? filled(poster, wanted) : nil);
+            });
+        }
+        videoAssetFileURLRequestHandler:^(CGSize wanted, void (^completion)(NSURL *)) {
+            dispatch_async(clipQueue(), ^{
+                BOOL ok = make();
+                AULog(@"lock screen: video cover for \"%@\" %@", title, ok ? @"handed over" : @"failed");
+                completion(ok ? file : nil);
+            });
+        }];
+    dispatch_async(clipQueue(), ^{ make(); });
+    AUTaurusSetExtras(@"motion", @{key: artwork}, title);
+    AULog(@"lock screen: the video cover offered for \"%@\"", title);
 }
 
 @end

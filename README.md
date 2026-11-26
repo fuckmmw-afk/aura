@@ -27,6 +27,8 @@ The same dylib also runs inside Yandex Music (`ru.yandex.mobile.music`, checked 
   the same picture from the player's carousel replaces a small one); `Sources/Core/AUYandex.m`;
 - the scene goes onto the centred cover of the player's carousel (`PlayerArtworkView` → its collection view's cells);
 - the lock screen's 3:4 clip is merged into the app's now playing info while it is about the same track;
+- a track's video cover (the short loop the app plays in its player) goes to the lock screen as it is, cropped to
+  3:4, instead of the 3D flight (`Sources/UI/AUVideoCover.m`);
 - settings are Aura's own page (`Sources/UI/AUOwnPage.m`): a button under Yandex's settings table, or two fingers held
   on the player's cover.
 
