@@ -161,6 +161,11 @@ UIViewController *AUSettingsPage(void) {
         AUSettingsChanged();
     };
     ADD(stats, thermal);
+    NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].lastObject;
+    NSURL *sideloadLog = [documents URLByAppendingPathComponent:@"SideloadFix.log"];
+    if ([NSFileManager.defaultManager fileExistsAtPath:sideloadLog.path]) {
+        ADD(stats, AURowAction(@"Поделиться логом Sideload Fix", @"Documents/SideloadFix.log: группы, связка ключей", ^{ AUShareFile(sideloadLog); }));
+    }
     ADD(stats, AURowAction(@"Поделиться логом", @"Documents/Aura/aura.log, в нём строка телеметрии раз в минуту", ^{ AUShareFile(AULogURL()); }));
     ADD(sections, AUSection(@"Диагностика", stats, nil));
 
