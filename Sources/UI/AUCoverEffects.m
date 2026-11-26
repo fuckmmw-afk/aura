@@ -2,6 +2,7 @@
 #import "Core/AUCore.h"
 #import "Core/AUTaurus.h"
 #import "Core/AUYandex.h"
+#import "UI/AUYandexFill.h"
 #import "Features/AUPipeline.h"
 #import "Core/AUTune.h"
 #import "Features/AUScene3D.h"
@@ -255,6 +256,7 @@ static UIScrollView *listOf(UIView *tilt) {
 }
 
 static UIView *taurusField(void) {
+    if (AUHostYandex()) return AUYandexFillField();
     UIView *(*field)(void) = (UIView * (*)(void)) dlsym(RTLD_DEFAULT, "SGRPlayerField");
     return field ? field() : nil;
 }

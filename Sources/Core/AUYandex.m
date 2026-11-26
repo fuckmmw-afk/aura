@@ -3,9 +3,12 @@
 #import "AUTaurus.h"
 #import "UI/AUCoverEffects.h"
 #import "UI/AUSettings.h"
+#import "UI/AUYandexFill.h"
+#import "UI/AULyrics.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <MediaPlayer/MediaPlayer.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 NSNotificationName const AUYandexArtworkDidChangeNotification = @"AUYandexArtworkDidChangeNotification";
 
@@ -28,6 +31,7 @@ static __weak id sg_center;
 static NSDictionary *sg_extras;
 static NSString *sg_extrasTitle;
 static BOOL sg_seenOwnAnimated;
+static double sg_elapsed = NAN, sg_rate, sg_stamp, sg_duration = NAN;
 
 // Read on the main queue from sg_info.
 static NSString *sg_uri, *sg_title;
@@ -183,6 +187,14 @@ NSDictionary *AUYandexNowPlayingWillSet(id center, NSDictionary *info) {
     }
     sg_info = own ? [own copy] : nil;
     sg_center = center;
+    id elapsed = own[MPNowPlayingInfoPropertyElapsedPlaybackTime], rate = own[MPNowPlayingInfoPropertyPlaybackRate];
+    id duration = own[MPMediaItemPropertyPlaybackDuration];
+    if ([elapsed respondsToSelector:@selector(doubleValue)]) {
+        sg_elapsed = [elapsed doubleValue];
+        sg_rate = [rate respondsToSelector:@selector(doubleValue)] ? [rate doubleValue] : 1;
+        sg_stamp = CACurrentMediaTime();
+    }
+    if ([duration respondsToSelector:@selector(doubleValue)]) sg_duration = [duration doubleValue];
     NSDictionary *result = merged(sg_info);
     [sg_lock unlock];
     dispatch_async(dispatch_get_main_queue(), ^{ processInfo(); });
@@ -197,6 +209,63 @@ UIImage *AUYandexArtwork(NSString **trackURI, NSString **pictureKey, BOOL *exact
 }
 
 NSString *AUYandexTrackURI(void) { return sg_uri; }
+
+double AUYandexPlaybackTime(void) {
+    if (isnan(sg_elapsed)) return NAN;
+    return sg_elapsed + (CACurrentMediaTime() - sg_stamp) * sg_rate;
+}
+
+BOOL AUYandexPlaying(void) { return sg_rate > 0; }
+double AUYandexDuration(void) { return sg_duration; }
+
+static NSString *infoString(NSString *key) {
+    [sg_lock lock];
+    id value = sg_info[key];
+    [sg_lock unlock];
+    return [value isKindOfClass:NSString.class] ? value : nil;
+}
+
+NSString *AUYandexTrackArtist(void) { return infoString(MPMediaItemPropertyArtist); }
+NSString *AUYandexTrackAlbum(void) { return infoString(MPMediaItemPropertyAlbumTitle); }
+
+#pragma mark - seeking
+
+static id sg_seekHandler, sg_seekTarget;
+static SEL sg_seekAction;
+
+void AUYandexRemoteHandlerAdded(id command, id handler, id target, SEL action) {
+    if (command != MPRemoteCommandCenter.sharedCommandCenter.changePlaybackPositionCommand) return;
+    if (handler) sg_seekHandler = [handler copy];
+    else if (target && action) {
+        sg_seekTarget = target;
+        sg_seekAction = action;
+    }
+}
+
+BOOL AUYandexSeek(double seconds) {
+    Class eventClass = NSClassFromString(@"MPChangePlaybackPositionCommandEvent");
+    if (!eventClass || (!sg_seekHandler && !sg_seekTarget)) {
+        AULog(@"yandex: no seek handler from the app");
+        return NO;
+    }
+    id event = [eventClass new];
+    @try {
+        [event setValue:@(seconds) forKey:@"positionTime"];
+    } @catch (NSException *e) {
+        AULog(@"yandex: the seek event takes no time: %@", e.reason);
+        return NO;
+    }
+    if (sg_seekHandler) {
+        MPRemoteCommandHandlerStatus (^handler)(MPRemoteCommandEvent *) = sg_seekHandler;
+        handler(event);
+    } else {
+        ((void (*)(id, SEL, id))objc_msgSend)(sg_seekTarget, sg_seekAction, event);
+    }
+    // Shown at once, before the app reports the new position.
+    sg_elapsed = seconds;
+    sg_stamp = CACurrentMediaTime();
+    return YES;
+}
 NSString *AUYandexTrackTitle(void) { return sg_title; }
 
 NSString *AUYandexTrackPictureKey(void) {
@@ -311,6 +380,7 @@ void AUYandexArtworkViewLaidOut(UIView *view) {
         }
     }
     if (middle && nearest < 20) offerPlayerCopy(middle, [carousel isKindOfClass:UIScrollView.class] ? carousel : nil);
+    AUYandexFillUpdate(view, [carousel isKindOfClass:UICollectionView.class] ? carousel : nil);
 }
 
 void AUYandexArtworkCellLaidOut(UIView *cell) {
@@ -330,6 +400,10 @@ void AUYandexArtworkCellLaidOut(UIView *cell) {
         });
         return;
     }
+}
+
+void AUYandexPlayerLaidOut(UIViewController *controller) {
+    AULyricsPlayerLaidOut(controller);
 }
 
 #pragma mark - settings

@@ -7,6 +7,9 @@
 #import "Features/AUPipeline.h"
 #import "UI/AULockScreen.h"
 #import "UI/AUVideoCover.h"
+#import "UI/AULyrics.h"
+#import "UI/AUYandexFill.h"
+#import "Core/AUYandexColors.h"
 
 #define ADD(array, row) do { id _r = (row); if (_r) [(array) addObject:_r]; } while (0)
 
@@ -117,6 +120,17 @@ UIViewController *AUSettingsPage(void) {
     upscale.changed = ^(BOOL on) { AUSettingsChanged(); };
     ADD(cover, AURowSymbol(upscale, @"arrow.up.left.and.arrow.down.right"));
     ADD(sections, AUSection(@"Обложка и тема", cover, yandex ? @"Переключатели работают сразу. Эффекты — на обложке в полноэкранном плеере." : kRestart));
+
+    if (yandex) {
+        NSMutableArray *ui = [NSMutableArray array];
+        SGModRow *white = AURowSwitch(@"Белый вместо жёлтого", @"Жёлтые кнопки и акценты Яндекса — белые. Вступает после перезапуска приложения", AUKeyWhiteAccent);
+        ADD(ui, AURowSymbol(white, @"circle.lefthalf.filled"));
+        SGModRow *fill = AURowSwitch(@"Fill", @"Обложка во всю ширину сверху и уходит в плеер, с 3D-сценой; обложка в карусели скрыта", AUKeyYandexFill);
+        fill.changed = ^(BOOL on) { AUSettingsChanged(); };
+        ADD(ui, AURowSymbol(fill, @"rectangle.inset.topleft.filled"));
+        ADD(ui, AURowSymbol(AURowPage(@"Текст песни", ^UIViewController *{ return AULyricsSettingsPage(); }), @"quote.bubble.fill"));
+        ADD(sections, AUSection(@"Интерфейс Яндекса", ui, nil));
+    }
 
     NSMutableArray *lock = [NSMutableArray array];
     SGModRow *lockRow = AURowChoice(@"Обложка на экране блокировки", nil, AUKeyLockScreen, @[@"3D-облёт", @"Растянуть", @"Выкл"], 0);

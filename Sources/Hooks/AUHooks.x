@@ -11,6 +11,8 @@
 #import "UI/AUSettings.h"
 #import "UI/AUTheme.h"
 #import "UI/AUVideoCover.h"
+#import "UI/AULyrics.h"
+#import "Core/AUYandexColors.h"
 #import <AVFoundation/AVFoundation.h>
 
 %group Player
@@ -87,6 +89,57 @@
 %end
 %end
 
+// The player's screen: Fill and the lyrics (Core/AUYandex, UI/AULyrics).
+%group YandexPlayerScreen
+%hook _TtC23MusicPlayerLandingMaple20PlayerViewController
+- (void)viewDidLayoutSubviews {
+    %orig;
+    AUYandexPlayerLaidOut((UIViewController *)self);
+}
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    AUYandexPlayerLaidOut((UIViewController *)self);
+}
+%end
+%end
+
+// The app's lyrics as they download (only bodies that look like LRC are read).
+%group YandexNet
+%hook NSURLSession
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))handler {
+    if (!handler) return %orig;
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        AULyricsSawBody(data, response.URL);
+        handler(data, response, error);
+    };
+    return %orig(request, wrapped);
+}
+- (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))handler {
+    if (!handler) return %orig;
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        AULyricsSawBody(data, response.URL);
+        handler(data, response, error);
+    };
+    return %orig(url, wrapped);
+}
+%end
+%end
+
+// The app's handler for "change playback position", for a tap on a line of the lyrics.
+%group YandexRemote
+%hook MPRemoteCommand
+- (id)addTargetWithHandler:(MPRemoteCommandHandlerStatus (^)(MPRemoteCommandEvent *))handler {
+    id token = %orig;
+    AUYandexRemoteHandlerAdded(self, handler, nil, NULL);
+    return token;
+}
+- (void)addTarget:(id)target action:(SEL)action {
+    %orig;
+    AUYandexRemoteHandlerAdded(self, nil, target, action);
+}
+%end
+%end
+
 // The video covers the app plays in its player (UI/AUVideoCover).
 %group YandexVideo
 %hook AVPlayer
@@ -139,6 +192,8 @@ static void startYandex(double started) {
     AUSystemStart();
     %init(YandexNowPlaying);
     %init(YandexVideo);
+    %init(YandexNet);
+    if (NSClassFromString(@"_TtC23MusicPlayerLandingMaple20PlayerViewController")) %init(YandexPlayerScreen);
     AUYandexStart();
     [AUPipeline.shared start];
     if (NSClassFromString(@"_TtC23MusicPlayerLandingMaple17PlayerArtworkView")) {
@@ -204,6 +259,11 @@ static void start(void) {
 
 %ctor {
     @autoreleasepool {
+        // Before the app's own code: its colours and its remote command handlers pass through Aura from the start.
+        if (AUHostYandex()) {
+            AUYandexColorsInstall();
+            %init(YandexRemote);
+        }
         dispatch_async(dispatch_get_main_queue(), ^{ start(); });
     }
 }

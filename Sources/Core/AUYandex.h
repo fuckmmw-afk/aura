@@ -20,6 +20,20 @@ NSString *_Nullable AUYandexTrackURI(void);
 NSString *_Nullable AUYandexTrackTitle(void);
 NSString *_Nullable AUYandexTrackPictureKey(void);
 
+// Where the song is now (seconds), from the now playing info's elapsed time and rate; NAN before the app says.
+double AUYandexPlaybackTime(void);
+BOOL AUYandexPlaying(void);
+double AUYandexDuration(void);
+NSString *_Nullable AUYandexTrackArtist(void);
+NSString *_Nullable AUYandexTrackAlbum(void);
+// Seeks through the app's own handler of the "change playback position" remote command (captured at launch).
+BOOL AUYandexSeek(double seconds);
+// From the MPRemoteCommand hooks, at launch: the app's handlers.
+void AUYandexRemoteHandlerAdded(id command, id _Nullable handler, id _Nullable target, SEL _Nullable action);
+
+// The player's view controller laid out: Fill, the lyrics and the player's tree for the log.
+void AUYandexPlayerLaidOut(UIViewController *controller);
+
 // The lock screen's extras (nil to take them back) for the track called `title`.
 void AUYandexSetExtras(NSDictionary *_Nullable extras, NSString *_Nullable title);
 

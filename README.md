@@ -29,6 +29,11 @@ The same dylib also runs inside Yandex Music (`ru.yandex.mobile.music`, checked 
 - the lock screen's 3:4 clip is merged into the app's now playing info while it is about the same track;
 - a track's video cover (the short loop the app plays in its player) goes to the lock screen as it is, cropped to
   3:4, instead of the 3D flight (`Sources/UI/AUVideoCover.m`);
+- the app's yellow accents come out white (`Sources/Core/AUYandexColors.m`, UIColor hooks installed before main);
+- Fill: the cover across the width at the top of the player with the 3D scene, the carousel's covers hidden
+  (`Sources/UI/AUYandexFill.m`);
+- Aura's own lyrics screen over the app's (`Sources/UI/AULyrics.m`): the app's LRC as it downloads, else LRCLIB;
+  tap a line to seek through the app's own remote command handler;
 - settings are Aura's own page (`Sources/UI/AUOwnPage.m`): a button under Yandex's settings table, or two fingers held
   on the player's cover.
 
