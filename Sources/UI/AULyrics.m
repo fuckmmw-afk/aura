@@ -425,6 +425,7 @@ static void AULyricsMiniRefresh(void);
     CGFloat _userOffset, _laidWidth;
     CFTimeInterval _userTouched;
     UILabel *_empty;
+    UILabel *_glow;   // the current line again, blurred, behind it (a layer shadow is cut square by the sweep's mask)
     CAGradientLayer *_edges;
     NSString *_settingsStamp;
     __weak UIImage *_backdropOf;
@@ -543,12 +544,6 @@ static void AULyricsMiniRefresh(void);
         NSString *text = line.text.length ? line.text : @"• • •";
         label.attributedText = [[NSAttributedString alloc] initWithString:text attributes:@{
             NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.whiteColor, NSParagraphStyleAttributeName: paragraph}];
-        if (AUEnabled(AUKeyLyricsGlow)) {
-            label.layer.shadowColor = UIColor.whiteColor.CGColor;
-            label.layer.shadowRadius = 8;
-            label.layer.shadowOpacity = 0;
-            label.layer.shadowOffset = CGSizeZero;
-        }
         CGSize size = [label sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)];
         size.width = width;
         label.frame = (CGRect){CGPointMake(inset, 0), size};
@@ -690,13 +685,39 @@ static void AULyricsMiniRefresh(void);
             [UIView performWithoutAnimation:apply];
         }
         label.layer.filters = blurFilter(radius);
-        label.layer.shadowOpacity = lit && AUEnabled(AUKeyLyricsGlow) ? 0.35 : 0;
         if (!lit) label.layer.mask = nil;
     }
+    [self placeGlow:animated];
 }
 
 // The sung part of the current line lit, the rest still dim: by its words' own times when the lyrics have them,
 // else evenly through the time until the next line (at most as long as it takes to say).
+- (void)placeGlow:(BOOL)animated {
+    BOOL want = AUEnabled(AUKeyLyricsGlow) && _set.synced && _active && _current >= 0 && _current < (NSInteger)_labels.count;
+    if (!want) {
+        _glow.hidden = YES;
+        return;
+    }
+    UILabel *label = _labels[(NSUInteger)_current];
+    if (!_glow) {
+        _glow = [UILabel new];
+        _glow.numberOfLines = 0;
+        _glow.userInteractionEnabled = NO;
+    }
+    if (_glow.superview != self || [self.subviews indexOfObject:_glow] > [self.subviews indexOfObject:label]) [self insertSubview:_glow belowSubview:label];
+    if (_glow.attributedText != label.attributedText) _glow.attributedText = label.attributedText;
+    _glow.layer.filters = blurFilter(MAX(6, fontSize() * 0.3));
+    _glow.layer.anchorPoint = label.layer.anchorPoint;
+    _glow.hidden = NO;
+    void (^apply)(void) = ^{
+        self->_glow.bounds = label.bounds;
+        self->_glow.center = label.center;
+        self->_glow.alpha = 0.55;
+    };
+    if (animated) [UIView animateWithDuration:0.7 delay:0.04 usingSpringWithDamping:0.86 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:apply completion:nil];
+    else [UIView performWithoutAnimation:apply];
+}
+
 - (void)sweep:(double)t {
     if (_current < 0 || _current >= (NSInteger)_labels.count) return;
     AULyricLine *line = _set.lines[(NSUInteger)_current];
@@ -902,6 +923,7 @@ void AULyricsStart(void) {
 #pragma mark - folded up, in the cover's card
 
 static __weak UIView *sMiniArtwork, *sMiniCell;
+static CGRect sCardRect;   // the card, in the player's view, as last seen (the app remakes its cells when it folds lyrics in)
 static AULyricsView *sMini;
 static BOOL (^sMiniVisible)(void);
 
@@ -938,7 +960,13 @@ static void AULyricsMiniRefresh(void) {
     AULyricsView *view = sMini;
     UIView *artwork = sMiniArtwork, *cell = sMiniCell;
     if (!view) return;
-    BOOL want = AUEnabled(AUKeyLyrics) && artwork.window && cell && sMiniVisible && sMiniVisible();
+    UIView *listNow = AUYandexPlayerLayerOf(artwork);
+    UIView *rootNow = listNow.superview;
+    if (cell.window && rootNow) {
+        CGRect seen = [rootNow convertRect:cell.bounds fromView:cell];
+        if (seen.size.width > 100) sCardRect = seen;
+    }
+    BOOL want = AUEnabled(AUKeyLyrics) && artwork.window && rootNow && !CGRectIsEmpty(sCardRect) && sMiniVisible && sMiniVisible();
     if (!want) {
         view.hidden = YES;
         // Still in the player's view, to keep looking (its display link runs only in a window).
@@ -956,7 +984,7 @@ static void AULyricsMiniRefresh(void) {
     } else if (view.superview != artwork) {
         [artwork addSubview:view];
     }
-    CGRect frame = [root convertRect:cell.bounds fromView:cell];
+    CGRect frame = sCardRect;
     if (!CGRectEqualToRect(view.frame, frame)) view.frame = frame;
     UIView *expand = [view.ownBackdrop viewWithTag:77];
     expand.frame = CGRectMake(frame.size.width - 34, 16, 18, 18);

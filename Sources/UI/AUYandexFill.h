@@ -7,6 +7,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 #define AUKeyYandexFill @"aura.ym.fill"   // on until switched off
+#define AUKeyYandexFillHeight @"aura.ym.fillHeight"   // the field's share of the screen
 
 @interface AUYandexFillView : UIView
 @property (nonatomic, strong, readonly) CALayer *fill;

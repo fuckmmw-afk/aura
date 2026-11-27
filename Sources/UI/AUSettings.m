@@ -128,9 +128,15 @@ UIViewController *AUSettingsPage(void) {
         NSMutableArray *ui = [NSMutableArray array];
         SGModRow *white = AURowSwitch(@"Белый вместо жёлтого", @"Жёлтые кнопки и акценты Яндекса — белые. Вступает после перезапуска приложения", AUKeyWhiteAccent);
         ADD(ui, AURowSymbol(white, @"circle.lefthalf.filled"));
-        SGModRow *fill = AURowSwitch(@"Fill", @"Обложка во всю ширину сверху и уходит в плеер, с 3D-сценой; обложка в карусели скрыта", AUKeyYandexFill);
+        SGModRow *fill = AURowSwitch(@"Fill", @"Обложка растянута по верху экрана и плавно уходит в плеер, с 3D-сценой; обложка в карусели скрыта", AUKeyYandexFill);
         fill.changed = ^(BOOL on) { AUSettingsChanged(); };
         ADD(ui, AURowSymbol(fill, @"rectangle.inset.topleft.filled"));
+        SGModRow *fillHeight = AURowSlider(@"Высота Fill", @"Какую часть экрана сверху занимает обложка, прежде чем уйти в плеер", 0.35, 0.95, 0.01,
+                                           ^double { return AUNumber(AUKeyYandexFillHeight, 0.62); },
+                                           ^(double value) { AUSetNumber(AUKeyYandexFillHeight, value); },
+                                           ^NSString *(double value) { return [NSString stringWithFormat:@"%.0f%%", value * 100]; });
+        fillHeight.waitsOn = AUKeyYandexFill;
+        ADD(ui, fillHeight);
         ADD(ui, AURowSymbol(AURowPage(@"Текст песни", ^UIViewController *{ return AULyricsSettingsPage(); }), @"quote.bubble.fill"));
         ADD(sections, AUSection(@"Интерфейс Яндекса", ui, nil));
     }

@@ -41,8 +41,6 @@ static CGImageRef blurredCopy(UIImage *image) {
 @implementation AUYandexFillView {
     CAGradientLayer *_fade;
     __weak UIImage *_shown;
-    CGSize _composedFor;
-    CGFloat _sideFor;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -52,7 +50,7 @@ static CGImageRef blurredCopy(UIImage *image) {
     _fill = [CALayer layer];
     _fill.actions = noActions();
     _fill.masksToBounds = YES;
-    _fill.contentsGravity = kCAGravityResize;
+    _fill.contentsGravity = kCAGravityResizeAspectFill;
     _fade = [CAGradientLayer layer];
     _fade.actions = noActions();
     _fill.mask = _fade;
@@ -72,32 +70,9 @@ static CGImageRef blurredCopy(UIImage *image) {
 }
 
 // The still picture as the fill's own contents (under every sublayer, as Taurus's is, so Aura's scene goes over it):
-// the cover across the width at the top, over a blurred copy of itself that fills the rest.
+// the cover stretched over the field.
 - (void)compose {
-    UIImage *image = _shown;
-    CGSize size = _fill.bounds.size;
-    if (!image.CGImage || size.width < 1 || size.height < 1) return;
-    _composedFor = size;
-    CGFloat side = size.width * AUTune(@"fillCrop");
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-    format.opaque = YES;
-    format.scale = MIN(2, UIScreen.mainScreen.scale);
-    CGImageRef soft = blurredCopy(image);
-    UIImage *made = [[[UIGraphicsImageRenderer alloc] initWithSize:size format:format] imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        CGContextRef c = context.CGContext;
-        if (soft) {
-            // Aspect fill, the image flipped upright for CGContextDrawImage.
-            CGFloat s = MAX(size.width, size.height);
-            CGContextSaveGState(c);
-            CGContextTranslateCTM(c, 0, size.height);
-            CGContextScaleCTM(c, 1, -1);
-            CGContextDrawImage(c, CGRectMake((size.width - s) / 2, (size.height - s) / 2, s, s), soft);
-            CGContextRestoreGState(c);
-        }
-        [image drawInRect:CGRectMake((size.width - side) / 2, 0, side, side)];
-    }];
-    if (soft) CGImageRelease(soft);
-    _fill.contents = (__bridge id)made.CGImage;
+    _fill.contents = (__bridge id)_shown.CGImage;
 }
 
 - (void)setPicture:(UIImage *)image {
@@ -109,17 +84,9 @@ static CGImageRef blurredCopy(UIImage *image) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGSize size = self.bounds.size;
-    // The whole screen's height (Taurus's field is 0.625 of it, its stage the rest): Aura's fade and the scene's
-    // stage are then the same height as the picture, and nothing ends in a hard edge.
-    CGFloat high = size.height;
-    CGFloat side = size.width * AUTune(@"fillCrop");
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
+    // Taurus's field: the top of the screen (0.62 by default), the picture faded out at its foot.
+    CGFloat high = round(size.height * AUNumber(AUKeyYandexFillHeight, 0.62));
     _fill.frame = CGRectMake(0, 0, size.width, high);
-    if (!CGSizeEqualToSize(_composedFor, _fill.bounds.size) || side != _sideFor) {
-        _sideFor = side;
-        [self compose];
-    }
     // The still picture's own fade (Aura's scene brings its own when it shows).
     CGFloat from = AUTune(@"fadeFrom"), to = MAX(from + 0.01, AUTune(@"fadeTo"));
     _fade.frame = _fill.bounds;
@@ -139,8 +106,24 @@ UIView *AUYandexFillField(void) {
     return fill.window && !fill.hidden ? fill : nil;
 }
 
+static char kEmptyMaskKey;
+
+static void hideByMask(UIView *view) {
+    CALayer *mask = objc_getAssociatedObject(view, &kEmptyMaskKey);
+    if (!mask) {
+        mask = [CALayer layer];
+        objc_setAssociatedObject(view, &kEmptyMaskKey, mask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (view.layer.mask != mask) {
+        view.layer.mask = mask;
+        [sHidden addObject:view];
+    }
+}
+
 static void restoreCells(void) {
-    for (UIView *view in sHidden) view.alpha = 1;
+    for (UIView *view in sHidden) {
+        if (view.layer.mask == objc_getAssociatedObject(view, &kEmptyMaskKey)) view.layer.mask = nil;
+    }
     [sHidden removeAllObjects];
 }
 
@@ -190,34 +173,18 @@ void AUYandexFillUpdate(UIView *artworkView, UICollectionView *carousel) {
     }
     UIImage *image = AUYandexArtwork(NULL, NULL, NULL);
     if (image) [fill setPicture:image];
-    // The artwork view's own background and its gradient lie over the fill (inside the player's card): they go too.
+    // The carousel's covers and the artwork view's own background and gradient give way: each drawn through an empty
+    // mask (the app animates their alpha itself, on pause and on a new track; it leaves masks alone). Still there to be
+    // swiped and tapped: a mask changes nothing of that.
+    NSMutableArray<UIView *> *parts = [NSMutableArray array];
+    if (carousel) [parts addObject:carousel];
     for (NSString *name in @[@"backgroundContainer", @"gradientOverlayView"]) {
         Ivar part = class_getInstanceVariable(object_getClass(artworkView), name.UTF8String);
         id view = part ? object_getIvar(artworkView, part) : nil;
-        if (![view isKindOfClass:UIView.class]) continue;
-        UIView *v = view;
-        static NSMutableSet *told;
-        if (!told) told = [NSMutableSet set];
-        if (![told containsObject:name]) {
-            [told addObject:name];
-            CGRect r = [v convertRect:v.bounds toView:nil];
-            AULog(@"yandex: %@ %@ %.0f,%.0f %.0fx%.0f, alpha %.2f%@", name, NSStringFromClass(v.class), r.origin.x, r.origin.y, r.size.width,
-                  r.size.height, v.alpha, v.layer.sublayers.count ? [NSString stringWithFormat:@", %lu sublayers", (unsigned long)v.layer.sublayers.count] : @"");
-        }
-        if (v.alpha != 0) {
-            v.alpha = 0;
-            [sHidden addObject:v];
-        }
+        if ([view isKindOfClass:UIView.class]) [parts addObject:view];
     }
+    for (UIView *view in parts) hideByMask(view);
     Ivar gradient = class_getInstanceVariable(object_getClass(artworkView), "gradientLayer");
     id gradientLayer = gradient ? object_getIvar(artworkView, gradient) : nil;
     if ([gradientLayer isKindOfClass:CALayer.class]) ((CALayer *)gradientLayer).hidden = YES;
-    // The carousel's covers give way (still there to be swiped).
-    for (UICollectionViewCell *cell in carousel.visibleCells) {
-        UIView *content = cell.contentView;
-        if (content.alpha != 0) {
-            content.alpha = 0;
-            [sHidden addObject:content];
-        }
-    }
 }
