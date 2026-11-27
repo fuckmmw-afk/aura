@@ -29,6 +29,7 @@ static const NSUInteger kTogetherMost = 3;   // more letters than this at once (
 
 typedef struct {
     BOOL on, compact, cursor, ear, earWords, learn;
+    NSInteger fps;
     double size, glow, tint, motion, lens, snap, gaps, speed, appear, width, pitch, lift, hold, sensitivity, offset;
 } AUTSettings;
 static AUTSettings gSet;
@@ -49,6 +50,9 @@ static const AUTSettings *settings(void) {
     gSet.ear = AUEnabled(AUKeyTypeLyricsEar);
     gSet.earWords = AUFlag(AUKeyTypeLyricsEarWords);
     gSet.learn = AUEnabled(AUKeyTypeLyricsLearn);
+    static const NSInteger rates[] = {24, 30, 60, 120};
+    NSInteger rate = AUInteger(AUKeyTypeLyricsFPS, 2);
+    gSet.fps = rates[rate >= 0 && rate < 4 ? rate : 2];
     gSet.size = clampNumber(AUKeyTypeLyricsSize, 1.0, 0.5, 1.5);
     gSet.glow = clampNumber(AUKeyTypeLyricsGlow, 0.35, 0, 1);
     gSet.tint = clampNumber(AUKeyTypeLyricsTint, 0.5, 0, 1);
@@ -604,6 +608,7 @@ static const CGFloat kMeasureEm = 100;
     UIColor *_textColor, *_glowColor;
     NSString *_colorKey;
     double _times[512];
+    NSInteger _appliedFps;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -665,6 +670,7 @@ static const CGFloat kMeasureEm = 100;
         [self clearPage];
         _lineIndex = -1;
         if (@available(iOS 15.0, *)) _link.preferredFrameRateRange = CAFrameRateRangeMake(4, 10, 10);
+        _appliedFps = 0;
     }
 }
 
@@ -726,7 +732,13 @@ static const CGFloat kMeasureEm = 100;
     if (!_active) {
         _active = YES;
         self.hidden = NO;
-        if (@available(iOS 15.0, *)) _link.preferredFrameRateRange = CAFrameRateRangeMake(30, 60, 60);
+        _appliedFps = 0;
+    }
+    if (_appliedFps != set->fps) {   // «Частота кадров»; 120 only where the app allows ProMotion
+        _appliedFps = set->fps;
+        float fps = (float)set->fps;
+        if (@available(iOS 15.0, *)) _link.preferredFrameRateRange = CAFrameRateRangeMake(fps, fps, fps);
+        else _link.preferredFramesPerSecond = set->fps;
     }
     UIView *scroll = objectIvar(karaoke, "_scroll");
     if (scroll) {
@@ -1254,6 +1266,9 @@ static UIViewController *typePage(void) {
     addRow(sections, AUSection(@"Вид", look, nil));
 
     NSMutableArray *motion = [NSMutableArray array];
+    SGModRow *fps = AURowChoice(@"Частота кадров", @"Анимации текста; 120 — только на ProMotion и если Spotify её разрешает", AUKeyTypeLyricsFPS, @[@"24", @"30", @"60", @"120"], 2);
+    fps.waitsOn = AUKeyTypeLyrics;
+    addRow(motion, AURowSymbol(fps, @"speedometer"));
     addSlider(motion, @"Резкость", @"Как быстро и жёстко буквы прыгают на новое место", AUKeyTypeLyricsSnap, 0, 1, 0.05, 0.75, @"%.0f%%", 100, AUKeyTypeLyrics);
     addSlider(motion, @"Растяжка пробелов", @"За сколько раздвигаются пробелы строки, ставшей по ширине", AUKeyTypeLyricsGaps, 0, 2, 0.05, 0.8, @"%.2f с", 1, AUKeyTypeLyrics);
     addSlider(motion, @"Проявление буквы", @"Сколько новая буква выходит из размытия", AUKeyTypeLyricsAppear, 0, 0.4, 0.01, 0.11, @"%.0f мс", 1000, AUKeyTypeLyrics);

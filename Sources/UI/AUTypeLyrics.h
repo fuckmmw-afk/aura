@@ -41,6 +41,7 @@ NS_ASSUME_NONNULL_BEGIN
 #define AUKeyTypeLyricsLearn @"aura.type.learn"      // hear and remember in the background; on until switched off
 #define AUKeyTypeLyricsSensitivity @"aura.type.sens" // ×0.5…2
 #define AUKeyTypeLyricsOffset @"aura.type.offset"    // ms added to what is heard
+#define AUKeyTypeLyricsFPS @"aura.type.fps"          // the animation's frame rate: index of 24 / 30 / 60 / 120, 60 unset
 
 // The settings and the background ear, once Taurus is found (Hooks/AUHooks.x).
 void AUTypeLyricsStart(void);

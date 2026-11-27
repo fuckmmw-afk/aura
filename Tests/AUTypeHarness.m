@@ -9,6 +9,7 @@
 
 // The rows of Aura's page come from Taurus, the cover's colours from the pipeline; neither is here.
 SGModRow *AURowSwitch(NSString *title, NSString *subtitle, NSString *key) { return nil; }
+SGModRow *AURowChoice(NSString *title, NSString *subtitle, NSString *key, NSArray<NSString *> *choices, NSInteger fallback) { return nil; }
 SGModRow *AURowOption(NSString *title, NSString *subtitle, NSString *key) { return nil; }
 SGModRow *AURowSlider(NSString *title, NSString *subtitle, double minimum, double maximum, double step,
                       double (^get)(void), void (^set)(double value), NSString * (^format)(double value)) { return nil; }
