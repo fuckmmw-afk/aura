@@ -1189,6 +1189,8 @@ void AUTypeLyricsKaraokeLaidOut(UIView *karaoke) {
     [view wake];
 }
 
+void AUTypeLyricsWriteOutSwitches(void);
+
 #pragma mark - the background ear
 
 // While no lyrics are on screen the playing song is still heard and its lines remembered, from Taurus's own lines.
@@ -1226,6 +1228,7 @@ static void listenInBackground(void) {
 void AUTypeLyricsStart(void) {
     static NSTimer *timer;
     if (timer) return;
+    AUTypeLyricsWriteOutSwitches();
     timer = [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *t) { listenInBackground(); }];
     timer.tolerance = 0.01;
 }
@@ -1303,7 +1306,21 @@ static UIViewController *typePage(void) {
                       @"Шрифт Gagalin © Iordanis Passas (бесплатный), очищен от текстуры.");
 }
 
+// Taurus dims and locks a row whose waitsOn key is unset (SGFlag reads unset as off), while Aura's switches are on
+// until switched off: the keys rows wait on are written out as they stand.
+static void writeOut(NSString *key) {
+    NSUserDefaults *store = NSUserDefaults.standardUserDefaults;
+    if (![store objectForKey:key]) [store setBool:YES forKey:key];
+}
+
+void AUTypeLyricsWriteOutSwitches(void) {
+    writeOut(AUKeyTypeLyrics);
+    writeOut(AUKeyTypeLyricsEar);
+    writeOut(AUKeyTheme);
+}
+
 NSArray *AUTypeLyricsRows(void) {
+    AUTypeLyricsWriteOutSwitches();
     NSMutableArray *rows = [NSMutableArray array];
     SGModRow *on = AURowSwitch(@"Печатная машинка", @"Строка печатается по буквам в такт голосу: Gagalin, курсор, буквы из размытия, текст по ширине", AUKeyTypeLyrics);
     on.changed = ^(BOOL value) { AUSettingsChanged(); };
