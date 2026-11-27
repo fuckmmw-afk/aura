@@ -1921,7 +1921,6 @@ static void startLockLyrics(void) {
 }
 
 #else
-BOOL AUTypeLockShowing(void) { return NO; }
 static void startLockLyrics(void) {}
 #endif
 
