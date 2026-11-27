@@ -539,6 +539,7 @@ static NSURL *memoryURL(void) {
 @interface AUTRow : NSObject
 @property (nonatomic) NSUInteger first;
 @property (nonatomic) CGFloat gap, target;   // em
+@property (nonatomic) CGFloat widest;        // the widest gap that keeps the line inside, em
 @end
 @implementation AUTRow
 @end
@@ -873,9 +874,11 @@ static const CGFloat kMeasureEm = 100;
         BOOL last = r + 1 == rows.count;
         AUTRow *state = [AUTRow new];
         state.first = members[row.firstObject.unsignedIntegerValue].firstObject.unsignedIntegerValue;
-        state.target = last || row.count < 2 ? kSpace : MAX(kSpace, (width / em - total) / (row.count - 1));
+        state.widest = row.count < 2 ? kSpace : MAX(0, (width / em - total) / (row.count - 1));
+        state.target = last || row.count < 2 ? MIN(kSpace, state.widest) : MAX(MIN(kSpace, state.widest), state.widest);
         AUTRow *old = r < _rows.count ? _rows[r] : nil;
-        state.gap = old && old.first == state.first ? old.gap : kSpace;   // a line just formed starts tight
+        // A line just formed starts tight; gaps open out slowly but close at once (a word moved up must fit).
+        state.gap = MIN(old && old.first == state.first ? old.gap : kSpace, state.widest);
         [newRows addObject:state];
         CGFloat base = 0;
         for (NSUInteger slot = 0; slot < row.count; slot++) {
@@ -1069,7 +1072,9 @@ static CGPoint lens(CGPoint point, CGPoint centre, double radius, double k, doub
     // The gaps of a justified line open out slowly.
     double gapStep = set->gaps > 0.01 ? 1 - exp(-dt / (set->gaps / 2.3)) : 1;
     for (AUTRow *row in _rows) {
+        if (row.target < row.gap) row.gap = row.target;
         row.gap += (row.target - row.gap) * gapStep;
+        row.gap = MIN(row.gap, row.widest);
         if (fabs(row.target - row.gap) < 0.002) row.gap = row.target;
     }
     BOOL sizeSettled = _targetEm > 0 && fabs(_em - _targetEm) / _targetEm < 0.01;
