@@ -40,7 +40,7 @@ jobs:
           AURA_MODELS_URL: ${{ secrets.AURA_MODELS_URL }}
         run: |
           test -n "$AURA_MODELS_URL" || { echo "::error::AURA_MODELS_URL secret is not set"; exit 1; }
-          gmake -j4 FINALPACKAGE=1 AURA_VERSION="1.6.0-${GITHUB_SHA::7}" AURA_MODELS_URL="$AURA_MODELS_URL"
+          gmake -j4 FINALPACKAGE=1 AURA_VERSION="1.7.0-${GITHUB_SHA::7}" AURA_MODELS_URL="$AURA_MODELS_URL"
 
       - name: Check the dylib
         run: |
@@ -70,8 +70,10 @@ jobs:
           IOS="$SDK/System/iOSSupport"
           clang -target arm64-apple-ios17.0-macabi -isysroot "$SDK" -iframework "$IOS/System/Library/Frameworks" \
             -F "$IOS/System/Library/Frameworks" -L"$IOS/usr/lib" -fobjc-arc -ISources -DAURA_VERSION='"harness"' -DAURA_MODELS_URL='""' \
-            Tests/AUTypeHarness.m Sources/UI/AUTypeLyrics.m Sources/Vendor/AUGagalin.c Sources/Core/AUCore.m \
-            -framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreText -o aura-type-harness
+            Tests/AUTypeHarness.m Sources/UI/AUTypeLyrics.m Sources/Vendor/AUGagalin.c Sources/Core/AUCore.m Sources/Features/AUPalette.m \
+            Sources/Features/AUVoice.m Sources/Features/AUVoiceDSP.c Sources/Vendor/fishhook.c \
+            -framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreText -framework Accelerate \
+            -framework AVFoundation -framework AudioToolbox -o aura-type-harness
           AURA_LOG_STDERR=1 ./aura-type-harness type-frames
 
       - uses: actions/upload-artifact@v4

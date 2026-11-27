@@ -13,6 +13,7 @@
 #import "UI/AUVideoCover.h"
 #import "UI/AULyrics.h"
 #import "UI/AUTypeLyrics.h"
+#import "Features/AUVoice.h"
 #import "Core/AUYandexColors.h"
 #import <AVFoundation/AVFoundation.h>
 
@@ -266,7 +267,10 @@ static void start(void) {
     } else {
         AULog(@"no SGRArtworkField in Taurus: no effects on the Fill background");
     }
-    if (NSClassFromString(@"SGRKaraokeView")) %init(TypeLyrics);
+    if (NSClassFromString(@"SGRKaraokeView")) {
+        %init(TypeLyrics);
+        AUTypeLyricsStart();
+    }
     else AULog(@"no SGRKaraokeView in Taurus: no typewriter lyrics");
     initGlass();
     AUThemeStart();
@@ -283,6 +287,8 @@ static void start(void) {
             AUYandexColorsInstall();
             %init(YandexRemote);
         }
+        // Spotify: the typewriter's ear on the audio output, before Spotify starts it (read only).
+        else AUVoiceInstall();
         dispatch_async(dispatch_get_main_queue(), ^{ start(); });
     }
 }

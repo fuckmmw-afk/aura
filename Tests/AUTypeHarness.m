@@ -1,16 +1,26 @@
 // «Печатная машинка» (UI/AUTypeLyrics) run on its own, for Mac Catalyst in CI: a stand-in for Taurus's SGRKaraokeView
-// with the same ivars, four lines timed like the reference video, the view ticked in real time at 30 fps and every
+// with the same ivars, four lines of its own timed like the reference video, the view ticked in real time at 30 fps and every
 // frame written as a PNG (layer tree rendered; the blur filter does not show there). Usage: aura-type-harness <out dir>
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import "Core/AUTaurus.h"
+#import "Features/AUPipeline.h"
 #import "UI/AUTypeLyrics.h"
 
-// The rows of Aura's page come from Taurus; not here.
+// The rows of Aura's page come from Taurus, the cover's colours from the pipeline; neither is here.
 SGModRow *AURowSwitch(NSString *title, NSString *subtitle, NSString *key) { return nil; }
+SGModRow *AURowOption(NSString *title, NSString *subtitle, NSString *key) { return nil; }
 SGModRow *AURowSlider(NSString *title, NSString *subtitle, double minimum, double maximum, double step,
                       double (^get)(void), void (^set)(double value), NSString * (^format)(double value)) { return nil; }
 SGModRow *AURowSymbol(SGModRow *row, NSString *symbol) { return row; }
+SGModRow *AURowPage(NSString *title, UIViewController * (^page)(void)) { return nil; }
+SGModRow *AURowStat(NSString *title, NSString * (^value)(void)) { return nil; }
+SGModRow *AURowAction(NSString *title, NSString *subtitle, void (^action)(void)) { return nil; }
+SGModSection *AUSection(NSString *title, NSArray<SGModRow *> *rows, NSString *footer) { return nil; }
+UIViewController *AUMakePage(NSString *title, NSString *intro, NSArray *sections, NSString *footer) { return nil; }
+@implementation AUPipeline
++ (instancetype)shared { return nil; }
+@end
 
 @interface SGKaraokeWord : NSObject
 @property (nonatomic, copy) NSString *text;
@@ -73,10 +83,10 @@ int main(int argc, const char *argv[]) {
         FakeKaraoke *karaoke = [[FakeKaraoke alloc] initWithFrame:frame];
         karaoke->_scroll = [[UIScrollView alloc] initWithFrame:frame];
         [karaoke addSubview:karaoke->_scroll];
-        karaoke->_lines = @[line(0.517, @"Мой ремень — это Goyard, мне ваще похуям"),
-                            line(3.550, @"Я танцую, как Колян, я пьяный, да, я в хлам"),
-                            line(6.617, @"И на мне Yves Saint Laurent, ты бедный, блять, сорян"),
-                            line(9.750, @"Я тупой еблан, я кинул две точки в кальян")];
+        karaoke->_lines = @[line(0.517, @"Мой город — это бетон, мне всё равно, где дом"),
+                            line(3.550, @"Я танцую, как вчера, я слышу ритм, да, я в нём"),
+                            line(6.617, @"И на мне Yves Saint Laurent, ты рядом, слышишь, сорян"),
+                            line(9.750, @"Я пишу этот текст, я ставлю две точки в конце")];
         karaoke->_showing = YES;
         AUTypeLyricsKaraokeLaidOut(karaoke);
         UIView *type = karaoke.subviews.lastObject;
