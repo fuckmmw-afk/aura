@@ -33,6 +33,8 @@ NS_ASSUME_NONNULL_BEGIN
 #define AUKeyTypeLyricsSpeed @"aura.type.speed"      // ms a letter at most
 #define AUKeyTypeLyricsAppear @"aura.type.appear"    // s of a new letter's blur-in
 #define AUKeyTypeLyricsWidth @"aura.type.width"      // the letters' width, 0.6…1
+#define AUKeyTypeLyricsStretch @"aura.type.stretch"  // the letters taller at the same width, ×1…1.8
+#define AUKeyTypeLyricsBlock @"aura.type.block"      // the text block's height, share of the width, 0.3…1.2
 #define AUKeyTypeLyricsPitch @"aura.type.pitch"      // line pitch in em
 #define AUKeyTypeLyricsLift @"aura.type.lift"        // the text's height on screen, −0.3 lower … 0.3 higher
 #define AUKeyTypeLyricsHold @"aura.type.hold"        // s a sung line stays when the next is far off

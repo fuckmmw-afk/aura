@@ -25,7 +25,6 @@ extern const size_t AUGagalinOTF_len;
 // and the gaps in em. The rest are settings (AUTSettings).
 static const CGFloat kMargin = 0.045;    // each side
 static const CGFloat kMaxEm = 0.165;     // the largest size, a few words on a line
-static const CGFloat kBoxHeight = 0.50;  // the room the text must fit in; past it the text shrinks
 static const CGFloat kSpace = 0.26;      // the least gap between two words
 static const CGFloat kCapTop = 0.315;    // from the top of the em box down to the capitals (ascent 1.005 − cap 0.70)
 static const CGFloat kCapHeight = 0.74;  // the cursor's height
@@ -38,6 +37,7 @@ static const NSUInteger kTogetherMost = 3;   // more letters than this at once (
 typedef struct {
     BOOL on, compact, cursor, ear, earWords, learn;
     NSInteger fps;
+    double stretch, block;
     double size, glow, tint, motion, lens, snap, gaps, speed, appear, width, pitch, lift, hold, sensitivity, offset;
 } AUTSettings;
 static AUTSettings gSet;
@@ -61,6 +61,8 @@ static const AUTSettings *settings(void) {
     static const NSInteger rates[] = {24, 30, 60, 120};
     NSInteger rate = AUInteger(AUKeyTypeLyricsFPS, 2);
     gSet.fps = rates[rate >= 0 && rate < 4 ? rate : 2];
+    gSet.stretch = clampNumber(AUKeyTypeLyricsStretch, 1.3, 1.0, 1.8);
+    gSet.block = clampNumber(AUKeyTypeLyricsBlock, 0.7, 0.3, 1.2);
     gSet.size = clampNumber(AUKeyTypeLyricsSize, 1.0, 0.5, 1.5);
     gSet.glow = clampNumber(AUKeyTypeLyricsGlow, 0.35, 0, 1);
     gSet.tint = clampNumber(AUKeyTypeLyricsTint, 0.5, 0, 1);
@@ -674,6 +676,15 @@ static void typeTimes(AUTLine *line, NSArray<NSNumber *> *hits, const AUTSetting
     _set = *set;
 }
 
+// «Вытянуть вверх»: the letters taller at the same width (a bigger size, narrowed as much), the gaps as they were.
+- (double)letterWidth {
+    return _set.width / MAX(1, _set.stretch);
+}
+
+- (CGFloat)space {
+    return kSpace / MAX(1, _set.stretch);
+}
+
 - (void)setTextColor:(UIColor *)text glow:(UIColor *)glow key:(NSString *)key {
     if ([key isEqualToString:_colorKey]) return;
     _colorKey = [key copy];
@@ -708,7 +719,7 @@ static void typeTimes(AUTLine *line, NSArray<NSNumber *> *hits, const AUTSetting
     NSUInteger count = MIN(line.units.count, (NSUInteger)512);
     NSUInteger revealed = 0;
     while (revealed < count && times[revealed] <= clock) revealed++;
-    double signature = _set.size * 7 + _set.width * 13 + _set.pitch * 17 + _set.lift * 19;
+    double signature = _set.size * 7 + _set.width * 13 + _set.pitch * 17 + _set.lift * 19 + _set.stretch * 23 + _set.block * 29 + _set.motion * 31 + _set.lens * 37;
     BOOL relayout = !CGRectEqualToRect(_laidFor, _bounds) || signature != _laidSettings;
     if (revealed != _revealed || relayout) {
         NSUInteger added = revealed > _revealed ? revealed - _revealed : 0;
@@ -761,11 +772,15 @@ static void typeTimes(AUTLine *line, NSArray<NSNumber *> *hits, const AUTSetting
     UIEdgeInsets insets = _insets;
     CGFloat side = bounds.origin.x + MAX(bounds.size.width * kMargin, MAX(insets.left, insets.right));
     CGFloat width = MAX(40, bounds.size.width - 2 * (side - bounds.origin.x));
+    // Room for what moves the letters out afterwards: the page's swing and turn (the lens keeps to the box itself).
+    CGFloat swing = width * MIN(0.12, 0.035 * set->motion);
+    side += swing / 2;
+    width -= swing;
     CGFloat bandTop = bounds.origin.y + insets.top, bandHeight = MAX(40, bounds.size.height - insets.top - insets.bottom);
-    CGFloat boxHeight = MIN(bounds.size.width * kBoxHeight * set->size, bandHeight * 0.92);
+    CGFloat boxHeight = MIN(bounds.size.width * set->block * set->size, bandHeight * 0.92);
     CGFloat boxTop = bandTop + (bandHeight - boxHeight) / 2 - set->lift * bandHeight;
     boxTop = MAX(bandTop, MIN(boxTop, bandTop + bandHeight - boxHeight));
-    CGFloat em = MIN(bounds.size.width * kMaxEm * set->size, boxHeight / set->pitch);
+    CGFloat em = MIN(bounds.size.width * kMaxEm * set->size * set->stretch, boxHeight / set->pitch);
 
     NSArray<NSArray<NSNumber *> *> *rows = nil;
     for (int tries = 0; tries < 80; tries++, em *= 0.97) {
@@ -791,11 +806,12 @@ static void typeTimes(AUTLine *line, NSArray<NSNumber *> *hits, const AUTSetting
         BOOL last = r + 1 == rows.count;
         AUTRow *state = [AUTRow new];
         state.first = members[row.firstObject.unsignedIntegerValue].firstObject.unsignedIntegerValue;
-        state.widest = row.count < 2 ? kSpace : MAX(0, (width / em - total) / (row.count - 1));
-        state.target = last || row.count < 2 ? MIN(kSpace, state.widest) : state.widest;
+        CGFloat space = [self space];
+        state.widest = row.count < 2 ? space : MAX(0, (width / em - total) / (row.count - 1));
+        state.target = last || row.count < 2 ? MIN(space, state.widest) : state.widest;
         AUTRow *old = r < _rows.count ? _rows[r] : nil;
         // A line just formed starts tight; gaps open out slowly but close at once (a word moved up must fit).
-        state.gap = MIN(old && old.first == state.first ? old.gap : kSpace, state.widest);
+        state.gap = MIN(old && old.first == state.first ? old.gap : space, state.widest);
         [newRows addObject:state];
         CGFloat base = 0;
         for (NSUInteger slot = 0; slot < row.count; slot++) {
@@ -837,7 +853,7 @@ static void typeTimes(AUTLine *line, NSArray<NSNumber *> *hits, const AUTSetting
 
 - (CGPoint)targetOf:(AUTGlyph *)glyph em:(CGFloat)em {
     AUTRow *row = glyph.row < _rows.count ? _rows[glyph.row] : nil;
-    CGFloat gap = row ? row.gap : kSpace;
+    CGFloat gap = row ? row.gap : [self space];
     return CGPointMake(_side + em * (glyph.base + glyph.slot * gap), _boxTop + glyph.row * _set.pitch * em);
 }
 
@@ -846,7 +862,7 @@ static void typeTimes(AUTLine *line, NSArray<NSNumber *> *hits, const AUTSetting
     NSArray *kept = _measures[word];
     if (kept) return kept;
     if (_measures.count > 512) [_measures removeAllObjects];
-    CTFontRef font = typeFont(kMeasureEm, _set.width);
+    CTFontRef font = typeFont(kMeasureEm, [self letterWidth]);
     NSMutableArray<NSNumber *> *offsets = [NSMutableArray arrayWithCapacity:units];
     CGFloat width = 0;
     if (font) {
@@ -871,7 +887,7 @@ static void typeTimes(AUTLine *line, NSArray<NSNumber *> *hits, const AUTSetting
     CGFloat used = 0;
     for (NSUInteger w = 0; w < measured.count; w++) {
         CGFloat wordWidth = [measured[w][1] doubleValue] * em / kMeasureEm;
-        CGFloat need = row.count ? used + kSpace * em + wordWidth : wordWidth;
+        CGFloat need = row.count ? used + [self space] * em + wordWidth : wordWidth;
         if (row.count && need > width + 0.5) {
             [rows addObject:row];
             row = [NSMutableArray arrayWithObject:@(w)];
@@ -887,10 +903,10 @@ static void typeTimes(AUTLine *line, NSArray<NSNumber *> *hits, const AUTSetting
 
 // The letter's picture: its colour, the glow drawn in, room around it for the glow.
 - (CGImageRef)imageFor:(NSString *)text em:(CGFloat)em {
-    NSString *key = [NSString stringWithFormat:@"%@|%.1f|%.2f|%.2f|%@", text, em, _set.width, _scale, _colorKey];
+    NSString *key = [NSString stringWithFormat:@"%@|%.1f|%.3f|%.2f|%@", text, em, [self letterWidth], _scale, _colorKey];
     id kept = [_images objectForKey:key];
     if (kept) return (__bridge CGImageRef)kept;
-    CTFontRef font = typeFont(em, _set.width);
+    CTFontRef font = typeFont(em, [self letterWidth]);
     if (!font) return NULL;
     NSDictionary *attributes = @{(id)kCTFontAttributeName: (__bridge id)font, (id)kCTForegroundColorFromContextAttributeName: @YES};
     NSAttributedString *string = [[NSAttributedString alloc] initWithString:text attributes:attributes];
@@ -923,7 +939,7 @@ static void typeTimes(AUTLine *line, NSArray<NSNumber *> *hits, const AUTSetting
 
 // For the clips, where no filter is drawn: the letter blurred in a picture of its own, at one of three strengths.
 - (CGImageRef)blurredFor:(NSString *)text em:(CGFloat)em level:(int)level {
-    NSString *key = [NSString stringWithFormat:@"%@|%.1f|%.2f|%.2f|%@|b%d", text, em, _set.width, _scale, _colorKey, level];
+    NSString *key = [NSString stringWithFormat:@"%@|%.1f|%.3f|%.2f|%@|b%d", text, em, [self letterWidth], _scale, _colorKey, level];
     id kept = [_images objectForKey:key];
     if (kept) return (__bridge CGImageRef)kept;
     CGImageRef sharp = [self imageFor:text em:em];
@@ -972,10 +988,12 @@ static void spring(CGFloat *value, CGFloat *velocity, CGFloat target, double dt,
 }
 
 // The lens: further from the middle, a little further out and a little bigger (the reference's letters at the edges).
-static CGPoint lens(CGPoint point, CGPoint centre, double radius, double k, double *scale) {
+// `edge` is the growth at the box's corner: everything is divided by it, so the box's edges stay where they are and
+// no letter is pushed off the screen (the middle gets a little smaller instead).
+static CGPoint lens(CGPoint point, CGPoint centre, double radius, double k, double edge, double *scale) {
     double dx = (point.x - centre.x) / radius, dy = (point.y - centre.y) / radius, r2 = dx * dx + dy * dy;
-    double grow = 1 + k * r2;
-    *scale = MIN(1.6, MAX(0.6, 1 + 2 * k * r2));
+    double grow = (1 + k * r2) / edge;
+    *scale = MIN(1.6, MAX(0.6, (1 + 2 * k * r2) / edge));
     return CGPointMake(centre.x + (point.x - centre.x) * grow, centre.y + (point.y - centre.y) * grow);
 }
 
@@ -1040,6 +1058,8 @@ static CGPoint lens(CGPoint point, CGPoint centre, double radius, double k, doub
     BOOL sizeSettled = _targetEm > 0 && fabs(_em - _targetEm) / _targetEm < 0.01;
     CGPoint centre = CGPointMake(CGRectGetMidX(bounds), _boxTop + _boxHeight / 2);
     double k = kLensK * set->lens, radius = W / 2;
+    double hx = (W / 2 - (_side - bounds.origin.x)) / radius, hy = _boxHeight / 2 / radius;
+    double edge = MAX(0.3, 1 + k * (hx * hx + hy * hy));
     for (NSUInteger i = 0; i < _glyphs.count; i++) {
         AUTGlyph *glyph = _glyphs[i];
         CALayer *layer = glyph.layer;
@@ -1076,7 +1096,7 @@ static CGPoint lens(CGPoint point, CGPoint centre, double radius, double k, doub
                                                CGImageGetHeight((CGImageRef)contents) / _scale) : CGSizeZero;
         CGSize size = CGSizeMake(picture.width * s, picture.height * s);
         double lensScale = 1;
-        CGPoint at = lens(CGPointMake(p.x - pad * s + size.width / 2, p.y - pad * s + size.height / 2), centre, radius, k, &lensScale);
+        CGPoint at = lens(CGPointMake(p.x - pad * s + size.width / 2, p.y - pad * s + size.height / 2), centre, radius, k, edge, &lensScale);
         double smear = 0.25 * (1 - e);
         layer.bounds = CGRectMake(0, 0, size.width, size.height);
         layer.position = CGPointMake(round((at.x + size.width * lensScale * smear / 2) * pixel) / pixel, round(at.y * pixel) / pixel);
@@ -1097,7 +1117,7 @@ static CGPoint lens(CGPoint point, CGPoint centre, double radius, double k, doub
         CGFloat width = MAX(1.5, _em * 0.035), height = _em * kCapHeight;
         double lensScale = 1;
         CGPoint at = lens(CGPointMake(last.position.x + (last.advance + 0.05) * _em + width / 2,
-                                      last.position.y + (kCapTop - 0.02) * _em + height / 2), centre, radius, k, &lensScale);
+                                      last.position.y + (kCapTop - 0.02) * _em + height / 2), centre, radius, k, edge, &lensScale);
         _cursor.hidden = !on;
         _cursor.bounds = CGRectMake(0, 0, width, height * lensScale);
         _cursor.position = at;
@@ -1406,6 +1426,8 @@ static UIViewController *typePage(void) {
     NSMutableArray *look = [NSMutableArray array];
     addSlider(look, @"Размер", nil, AUKeyTypeLyricsSize, 0.5, 1.5, 0.05, 1.0, @"×%.2f", 1, AUKeyTypeLyrics);
     addSlider(look, @"Ширина букв", @"Как в видео — 80%", AUKeyTypeLyricsWidth, 0.6, 1.0, 0.02, 0.80, @"%.0f%%", 100, AUKeyTypeLyrics);
+    addSlider(look, @"Вытянуть вверх", @"Буквы выше при той же ширине", AUKeyTypeLyricsStretch, 1.0, 1.8, 0.05, 1.3, @"×%.2f", 1, AUKeyTypeLyrics);
+    addSlider(look, @"Высота блока", @"Сколько места текст может занять по высоте (от ширины экрана); больше — крупнее и больше строк", AUKeyTypeLyricsBlock, 0.3, 1.2, 0.05, 0.7, @"%.0f%%", 100, AUKeyTypeLyrics);
     addSlider(look, @"Межстрочный интервал", nil, AUKeyTypeLyricsPitch, 0.8, 1.3, 0.01, 0.95, @"%.2f em", 1, AUKeyTypeLyrics);
     addSlider(look, @"Высота на экране", @"Выше или ниже середины", AUKeyTypeLyricsLift, -0.3, 0.3, 0.01, 0, @"%+.0f%%", 100, AUKeyTypeLyrics);
     addSlider(look, @"Свечение", nil, AUKeyTypeLyricsGlow, 0, 1, 0.05, 0.35, @"%.0f%%", 100, AUKeyTypeLyrics);
@@ -1814,8 +1836,8 @@ static void releaseLock(void) {
 
 static NSString *lockLook(AUTLockPlan *plan) {
     AUTSettings s = plan.set;
-    return AUSHA1([NSString stringWithFormat:@"%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.0f|%d|%@|%@|%.0fx%.0f|%@",
-                   s.size, s.width, s.pitch, s.lift, s.glow, s.motion, s.lens, s.snap, s.gaps, s.appear, s.hold, s.speed, s.cursor,
+    return AUSHA1([NSString stringWithFormat:@"%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.2f|%.0f|%d|%@|%@|%.0fx%.0f|%@",
+                   s.stretch, s.block, s.size, s.width, s.pitch, s.lift, s.glow, s.motion, s.lens, s.snap, s.gaps, s.appear, s.hold, s.speed, s.cursor,
                    plan.colorKey, plan.background.lastPathComponent, plan.size.width, plan.size.height,
                    [plan.hits componentsJoinedByString:@","] ?: @"-"]);
 }
