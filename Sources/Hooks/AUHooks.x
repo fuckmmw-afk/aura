@@ -12,6 +12,7 @@
 #import "UI/AUTheme.h"
 #import "UI/AUVideoCover.h"
 #import "UI/AULyrics.h"
+#import "UI/AUTypeLyrics.h"
 #import "Core/AUYandexColors.h"
 #import <AVFoundation/AVFoundation.h>
 
@@ -54,6 +55,20 @@
 - (void)didMoveToWindow {
     %orig;
     AUThemeViewMoved((UIVisualEffectView *)self);
+}
+%end
+%end
+
+// Taurus's lyrics views, every one: «Печатная машинка» lays itself inside (UI/AUTypeLyrics).
+%group TypeLyrics
+%hook SGRKaraokeView
+- (void)layoutSubviews {
+    %orig;
+    AUTypeLyricsKaraokeLaidOut((UIView *)self);
+}
+- (void)didMoveToWindow {
+    %orig;
+    AUTypeLyricsKaraokeLaidOut((UIView *)self);
 }
 %end
 %end
@@ -251,6 +266,8 @@ static void start(void) {
     } else {
         AULog(@"no SGRArtworkField in Taurus: no effects on the Fill background");
     }
+    if (NSClassFromString(@"SGRKaraokeView")) %init(TypeLyrics);
+    else AULog(@"no SGRKaraokeView in Taurus: no typewriter lyrics");
     initGlass();
     AUThemeStart();
     AULockScreenStart();

@@ -40,7 +40,7 @@ jobs:
           AURA_MODELS_URL: ${{ secrets.AURA_MODELS_URL }}
         run: |
           test -n "$AURA_MODELS_URL" || { echo "::error::AURA_MODELS_URL secret is not set"; exit 1; }
-          gmake -j4 FINALPACKAGE=1 AURA_VERSION="1.5.4-${GITHUB_SHA::7}" AURA_MODELS_URL="$AURA_MODELS_URL"
+          gmake -j4 FINALPACKAGE=1 AURA_VERSION="1.6.0-${GITHUB_SHA::7}" AURA_MODELS_URL="$AURA_MODELS_URL"
 
       - name: Check the dylib
         run: |
@@ -61,6 +61,25 @@ jobs:
           python -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" -q install coremltools numpy pillow
           "$RUNNER_TEMP/venv/bin/python" scripts/check_models.py "$AURA_MODELS_URL"
+
+      # «Печатная машинка» on its own, the reference video's lines, every frame as a PNG.
+      - name: Typewriter lyrics harness (Mac Catalyst)
+        continue-on-error: true
+        run: |
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          IOS="$SDK/System/iOSSupport"
+          clang -target arm64-apple-ios17.0-macabi -isysroot "$SDK" -iframework "$IOS/System/Library/Frameworks" \
+            -F "$IOS/System/Library/Frameworks" -L"$IOS/usr/lib" -fobjc-arc -ISources -DAURA_VERSION='"harness"' -DAURA_MODELS_URL='""' \
+            Tests/AUTypeHarness.m Sources/UI/AUTypeLyrics.m Sources/Vendor/AUGagalin.c Sources/Core/AUCore.m \
+            -framework UIKit -framework QuartzCore -framework CoreGraphics -framework CoreText -o aura-type-harness
+          AURA_LOG_STDERR=1 ./aura-type-harness type-frames
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: type-frames
+          path: type-frames/
+          retention-days: 5
 
       # Aura's own pipeline and renderer, built for Mac Catalyst, on real covers fetched from Spotify's CDN.
       - name: Effects harness (Mac Catalyst)

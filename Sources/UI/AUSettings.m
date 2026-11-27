@@ -8,6 +8,7 @@
 #import "UI/AULockScreen.h"
 #import "UI/AUVideoCover.h"
 #import "UI/AULyrics.h"
+#import "UI/AUTypeLyrics.h"
 #import "UI/AUYandexFill.h"
 #import "Core/AUYandexColors.h"
 
@@ -123,6 +124,11 @@ UIViewController *AUSettingsPage(void) {
     upscale.changed = ^(BOOL on) { AUSettingsChanged(); };
     ADD(cover, AURowSymbol(upscale, @"arrow.up.left.and.arrow.down.right"));
     ADD(sections, AUSection(@"Обложка и тема", cover, yandex ? @"Переключатели работают сразу. Эффекты — на обложке в полноэкранном плеере." : kRestart));
+
+    if (!yandex) {
+        NSArray *type = AUTypeLyricsRows();
+        if (type.count) ADD(sections, AUSection(@"Текст песни", type, @"Как в лирик-видео: только текущая строка, по буквам, в такт словам. Работает в полноэкранном тексте Taurus, в тексте в плеере и в превью на странице Lyrics. Текст без тайминга остаётся обычным. Шрифт Gagalin © Iordanis Passas (бесплатный)."));
+    }
 
     if (yandex) {
         NSMutableArray *ui = [NSMutableArray array];
