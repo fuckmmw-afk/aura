@@ -43,6 +43,18 @@ NS_ASSUME_NONNULL_BEGIN
 #define AUKeyTypeLyricsOffset @"aura.type.offset"    // ms added to what is heard
 #define AUKeyTypeLyricsFPS @"aura.type.fps"          // the animation's frame rate: index of 24 / 30 / 60 / 120, 60 unset
 
+// The lock screen (iOS 26, under the 3D flight or the stretched cover): a clip per line, the line typed over that
+// track's own lock clip, drawn ahead while the line before shows. Timing from the lines remembered by ear, else the
+// source's words; the clip is handed over `lead` ms before the line so the lock screen has it on time.
+#define AUKeyTypeLock @"aura.lock.type"              // on until switched off
+#define AUKeyTypeLockSize @"aura.lock.type.size"     // ×0.5…1.5 of the in-app size
+#define AUKeyTypeLockLift @"aura.lock.type.lift"     // −0.3 lower … 0.3 higher
+#define AUKeyTypeLockLead @"aura.lock.type.lead"     // ms, −500…1500, 350 unset
+// The lyrics clips hold the lock screen (UI/AULockScreen offers its plain clip only when they do not).
+BOOL AUTypeLockShowing(void);
+NSArray *AUTypeLockRows(void);   // SGModRow, for the lock screen's section
+BOOL AUTypeLockTestClip(NSURL *file, NSURL *_Nullable background, NSArray *sourceLines, NSInteger index);   // the harness
+
 // The settings and the background ear, once Taurus is found (Hooks/AUHooks.x).
 void AUTypeLyricsStart(void);
 // A SGRKaraokeView laid out or moved to a window (Hooks/AUHooks.x).

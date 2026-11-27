@@ -19,4 +19,12 @@ BOOL AULockClipWrite(NSURL *file, AUScene *scene, CGSize size, BOOL moving);
 
 void AULockScreenStart(void);
 
+// For the typewriter's lyrics clips (UI/AUTypeLyrics): the size of a clip, the now playing key the lock screen takes a
+// 3:4 animated artwork under (nil where it takes none), the plain clip already written for a track (its loop is the
+// lyrics clips' background), and the plain artwork offered again once the lyrics clips give the lock screen back.
+CGSize AULockClipSize(void);
+NSString *_Nullable AULockArtworkKey(void);
+NSURL *_Nullable AULockScreenClipFor(NSString *uri);
+void AULockScreenOfferPlain(void);
+
 NS_ASSUME_NONNULL_END

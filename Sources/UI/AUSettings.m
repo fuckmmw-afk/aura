@@ -150,6 +150,9 @@ UIViewController *AUSettingsPage(void) {
         video.changed = ^(BOOL on) { AUSettingsChanged(); };
         ADD(lock, AURowSymbol(video, @"play.rectangle.fill"));
     }
+    if (!yandex) {
+        for (id row in AUTypeLockRows()) ADD(lock, row);
+    }
     ADD(sections, AUSection(@"Экран блокировки", lock, !yandex ? @"iOS 26+. Обложка на весь экран блокировки. «3D-облёт» — зацикленное видео: камера медленно ходит над картой глубины, артист впереди (гироскопа на локскрине нет)."
                                                                        " Заменяет стиль экрана блокировки Taurus." : @"iOS 26+. Обложка на весь экран блокировки. «3D-облёт» — зацикленное видео: камера медленно ходит над картой глубины, артист впереди (гироскопа на локскрине нет)."));
 

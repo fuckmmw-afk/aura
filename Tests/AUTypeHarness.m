@@ -122,6 +122,11 @@ int main(int argc, const char *argv[]) {
         }
         CGColorSpaceRelease(space);
         printf("frames written; the slowest tick %.2f ms; Taurus's lines hidden: %s\n", worst, karaoke->_scroll.alpha == 0 ? "yes" : "no");
+        // The lock screen's clip of the third line (no background: a dark field).
+        double clipStarted = CACurrentMediaTime();
+        BOOL clip = AUTypeLockTestClip([NSURL fileURLWithPath:[outDir stringByAppendingPathComponent:@"lock-line3.mp4"]], nil, karaoke->_lines, 2);
+        printf("lock clip %s in %.0f ms\n", clip ? "written" : "NOT written", (CACurrentMediaTime() - clipStarted) * 1000);
+        if (!clip) return 1;
         return 0;
     }
 }

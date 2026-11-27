@@ -14,6 +14,7 @@
 #import "Core/AUYandex.h"
 #import "Features/AUPipeline.h"
 #import "UI/AUVideoCover.h"
+#import "UI/AUTypeLyrics.h"
 #endif
 
 // (The numbers are Core/AUTune's: fps, loop, lockBoost, orbitX/Y, lockBlur, lockBlurFrom/To, lockShade, lockBitrate.)
@@ -381,7 +382,7 @@ static void pruneClips(void) {
     for (NSUInteger i = 16; i < files.count; i++) [NSFileManager.defaultManager removeItemAtURL:files[i] error:nil];
 }
 
-static CGSize clipSize(void) {
+CGSize AULockClipSize(void) {
     CGFloat (*pixels)(void) = (CGFloat (*)(void))dlsym(RTLD_DEFAULT, "SGMotionPixels");
     CGFloat width = pixels ? pixels() : UIScreen.mainScreen.nativeBounds.size.width * 0.75;
     width = MAX(floor(width / 16) * 16, 256);
@@ -398,6 +399,34 @@ static UIImage *filled(UIImage *image, CGSize size) {
     return [[[UIGraphicsImageRenderer alloc] initWithSize:size format:format] imageWithActions:^(UIGraphicsImageRendererContext *context) {
         [image drawInRect:CGRectMake((size.width - drawn.width) / 2, (size.height - drawn.height) / 2, drawn.width, drawn.height)];
     }];
+}
+
+// The plain clip written for each track, by URI: the typewriter's lyrics clips loop it behind the words.
+static NSMutableDictionary<NSString *, NSURL *> *gClips;
+
+static void rememberClip(NSString *uri, NSURL *file) {
+    if (!uri.length || !file) return;
+    @synchronized (NSURL.class) {
+        if (!gClips) gClips = [NSMutableDictionary dictionary];
+        gClips[uri] = file;
+    }
+}
+
+NSURL *AULockScreenClipFor(NSString *uri) {
+    if (!uri.length) return nil;
+    NSURL *file;
+    @synchronized (NSURL.class) {
+        file = gClips[uri];
+    }
+    return file && [NSFileManager.defaultManager fileExistsAtPath:file.path] ? file : nil;
+}
+
+NSString *AULockArtworkKey(void) {
+    if (@available(iOS 26.0, *)) {
+        NSString *key = keyNamed("MPNowPlayingInfoProperty3x4AnimatedArtwork");
+        if (key && NSClassFromString(@"MPMediaItemAnimatedArtwork") && [supportedKeys() containsObject:key]) return key;
+    }
+    return nil;
 }
 
 // What the clip of a track is made from, read on the main queue from the pipeline's artwork for that very track.
@@ -535,7 +564,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
             return;
         }
         BOOL moving = mode == 0;
-        CGSize size = clipSize();
+        CGSize size = AULockClipSize();
         __weak AULockScreen *weakSelf = self;
         // One offer per track: what it holds is fixed once it is first asked for, and shared by both requests.
         __block AULockMaterial *material = nil;
@@ -584,6 +613,7 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
                         ready = AULockClipWrite(file, material.scene, size, material.moving);
                         pruneClips();
                     }
+                    if (ready && !material.partial) rememberClip(uri, file);
                     AULog(@"lock screen: video for %@ %@", [uri substringFromIndex:uri.length > 8 ? uri.length - 8 : 0], ready ? @"handed over" : @"failed");
                     completion(ready ? file : nil);
                 });
@@ -598,14 +628,21 @@ static AULockMaterial *waitForMaterial(NSString *uri, BOOL moving, double patien
                 pruneClips();
                 AULog(@"lock screen: clip for %@ made ahead", [uriNow substringFromIndex:uriNow.length > 8 ? uriNow.length - 8 : 0]);
             }
+            if (file && !material.partial && [NSFileManager.defaultManager fileExistsAtPath:file.path]) rememberClip(uriNow, file);
         });
+        // The typewriter's lyrics clips hold the lock screen while a line is on: this one is made, and offered when
+        // they give it back (AULockScreenOfferPlain).
+        if (AUTypeLockShowing()) {
+            AULog(@"lock screen: %@ made for \"%@\", the lyrics clips hold the lock screen", moving ? @"3D flight" : @"stretched cover", title);
+            return;
+        }
         setExtras(@"motion", @{key: artwork}, title);
         AULog(@"lock screen: %@ offered for \"%@\"", moving ? @"3D flight" : @"stretched cover", title);
     }
 }
 
 - (void)offerVideo:(AVURLAsset *)video uri:(NSString *)uri title:(NSString *)title key:(NSString *)key artworkClass:(Class)artworkClass API_AVAILABLE(ios(26.0)) {
-    CGSize size = clipSize();
+    CGSize size = AULockClipSize();
     NSURL *file = [clipFolder() URLByAppendingPathComponent:[NSString stringWithFormat:@"video-%@-%.0fx%.0f.mp4", AUSHA1(video.URL.absoluteString), size.width, size.height]];
     __block UIImage *poster = nil;
     __block BOOL tried = NO, ready = NO;
@@ -656,6 +693,14 @@ void AULockScreenStart(void) {
     [AULockScreen shared];
 }
 
+void AULockScreenOfferPlain(void) {
+    [[AULockScreen shared] settingsChanged];
+}
+
 #else
 void AULockScreenStart(void) {}
+void AULockScreenOfferPlain(void) {}
+NSURL *AULockScreenClipFor(NSString *uri) { return nil; }
+NSString *AULockArtworkKey(void) { return nil; }
+CGSize AULockClipSize(void) { return CGSizeMake(768, 1024); }
 #endif
