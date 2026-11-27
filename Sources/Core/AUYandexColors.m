@@ -5,6 +5,9 @@
 #import "AUYandexColors.h"
 #import "AUCore.h"
 #import <objc/runtime.h>
+#import <dlfcn.h>
+#import <mach-o/dyld.h>
+#import "Vendor/fishhook.h"
 
 static BOOL yellowish(CGFloat r, CGFloat g, CGFloat b) {
     CGFloat max = MAX(r, MAX(g, b)), min = MIN(r, MIN(g, b));
@@ -30,82 +33,130 @@ static UIColor *whiteIfYellow(UIColor *color) {
 static BOOL sOn;
 
 
+// `block` in place of `sel` in `cls`, only when `cls` has its own: UIColor's inits run on its placeholder subclass.
+static IMP swapOwn(Class cls, SEL sel, id (^make)(IMP orig)) {
+    if (!cls) return NULL;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    IMP orig = NULL;
+    for (unsigned int i = 0; i < count; i++) {
+        if (method_getName(methods[i]) == sel) {
+            orig = method_getImplementation(methods[i]);
+            method_setImplementation(methods[i], imp_implementationWithBlock(make(orig)));
+            break;
+        }
+    }
+    free(methods);
+    return orig;
+}
+
+typedef UIColor *(*RGBA)(id, SEL, CGFloat, CGFloat, CGFloat, CGFloat);
+
+static id rgbaBlock(SEL sel, IMP imp) {
+    RGBA orig = (RGBA)imp;
+    return ^UIColor *(id self, CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
+        if (yellowish(r, g, b)) r = g = b = 1;
+        return orig(self, sel, r, g, b, a);
+    };
+}
+
+static id hsbaBlock(SEL sel, IMP imp) {
+    RGBA orig = (RGBA)imp;
+    return ^UIColor *(id self, CGFloat h, CGFloat s, CGFloat v, CGFloat a) {
+        if (v >= 0.70 && s >= 0.45 && h * 360 >= 38 && h * 360 <= 64) {
+            s = 0;
+            v = 1;
+        }
+        return orig(self, sel, h, s, v, a);
+    };
+}
+
+static id dynamicBlock(SEL sel, IMP imp) {
+    UIColor *(*orig)(id, SEL, id) = (UIColor * (*)(id, SEL, id))imp;
+    return ^UIColor *(id self, UIColor * (^provider)(UITraitCollection *)) {
+        UIColor * (^wrapped)(UITraitCollection *) = provider ? ^UIColor *(UITraitCollection *traits) {
+            return whiteIfYellow(provider(traits));
+        } : nil;
+        return orig(self, sel, wrapped);
+    };
+}
+
+#pragma mark - CGColor
+
+// Colours made straight as CGColors (DivKit's layouts, Lottie, the app's own layers) in the app's own images.
+static CGColorRef (*origCreate)(CGColorSpaceRef, const CGFloat *);
+static CGColorRef (*origSRGB)(CGFloat, CGFloat, CGFloat, CGFloat);
+static CGColorRef (*origGeneric)(CGFloat, CGFloat, CGFloat, CGFloat);
+
+static CGColorRef whiteCreate(CGColorSpaceRef space, const CGFloat *components) {
+    if (space && components && CGColorSpaceGetModel(space) == kCGColorSpaceModelRGB && CGColorSpaceGetNumberOfComponents(space) == 3
+        && yellowish(components[0], components[1], components[2])) {
+        CGFloat white[4] = {1, 1, 1, components[3]};
+        return origCreate(space, white);
+    }
+    return origCreate(space, components);
+}
+
+static CGColorRef whiteSRGB(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
+    if (yellowish(r, g, b)) r = g = b = 1;
+    return origSRGB(r, g, b, a);
+}
+
+static CGColorRef whiteGeneric(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
+    if (yellowish(r, g, b)) r = g = b = 1;
+    return origGeneric(r, g, b, a);
+}
+
+static struct rebinding sColorRebindings[3];
+
+static void addedImage(const struct mach_header *header, intptr_t slide) {
+    Dl_info info;
+    if (!dladdr(header, &info) || !info.dli_fname || !strstr(info.dli_fname, ".app/")) return;
+    struct rebinding copy[3];
+    memcpy(copy, sColorRebindings, sizeof(copy));
+    for (int i = 0; i < 3; i++) copy[i].replaced = NULL;
+    rebind_symbols_image((void *)header, slide, copy, 3);
+}
+
 void AUYandexColorsInstall(void) {
     id value = [NSUserDefaults.standardUserDefaults objectForKey:AUKeyWhiteAccent];
     sOn = value ? [value boolValue] : YES;
     if (!sOn) return;
-    Class cls = UIColor.class, meta = object_getClass(UIColor.class);
-
-    typedef UIColor *(*RGBA)(id, SEL, CGFloat, CGFloat, CGFloat, CGFloat);
-    {
-        SEL sel = @selector(initWithRed:green:blue:alpha:);
-        Method m = class_getInstanceMethod(cls, sel);
-        __block RGBA orig = (RGBA)method_getImplementation(m);
-        method_setImplementation(m, imp_implementationWithBlock(^UIColor *(id self, CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
-            if (yellowish(r, g, b)) r = g = b = 1;
-            return orig(self, sel, r, g, b, a);
-        }));
+    Class meta = object_getClass(UIColor.class);
+    NSArray<Class> *classes = @[UIColor.class, NSClassFromString(@"UIPlaceholderColor") ?: UIColor.class];
+    for (Class cls in [NSSet setWithArray:classes]) {
+        SEL rgba = @selector(initWithRed:green:blue:alpha:), p3 = @selector(initWithDisplayP3Red:green:blue:alpha:);
+        SEL hsba = @selector(initWithHue:saturation:brightness:alpha:), dynamic = @selector(initWithDynamicProvider:);
+        swapOwn(cls, rgba, ^id(IMP orig) { return rgbaBlock(rgba, orig); });
+        swapOwn(cls, p3, ^id(IMP orig) { return rgbaBlock(p3, orig); });
+        swapOwn(cls, hsba, ^id(IMP orig) { return hsbaBlock(hsba, orig); });
+        swapOwn(cls, dynamic, ^id(IMP orig) { return dynamicBlock(dynamic, orig); });
     }
-    {
-        SEL sel = @selector(colorWithRed:green:blue:alpha:);
-        Method m = class_getInstanceMethod(meta, sel);
-        __block RGBA orig = (RGBA)method_getImplementation(m);
-        method_setImplementation(m, imp_implementationWithBlock(^UIColor *(id self, CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
-            if (yellowish(r, g, b)) r = g = b = 1;
-            return orig(self, sel, r, g, b, a);
-        }));
-    }
-    {
-        SEL sel = @selector(initWithDisplayP3Red:green:blue:alpha:);
-        Method m = class_getInstanceMethod(cls, sel);
-        __block RGBA orig = (RGBA)method_getImplementation(m);
-        method_setImplementation(m, imp_implementationWithBlock(^UIColor *(id self, CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
-            if (yellowish(r, g, b)) r = g = b = 1;
-            return orig(self, sel, r, g, b, a);
-        }));
-    }
-    {
-        typedef UIColor *(*HSBA)(id, SEL, CGFloat, CGFloat, CGFloat, CGFloat);
-        SEL sel = @selector(initWithHue:saturation:brightness:alpha:);
-        Method m = class_getInstanceMethod(cls, sel);
-        __block HSBA orig = (HSBA)method_getImplementation(m);
-        method_setImplementation(m, imp_implementationWithBlock(^UIColor *(id self, CGFloat h, CGFloat s, CGFloat v, CGFloat a) {
-            if (v >= 0.70 && s >= 0.45 && h * 360 >= 38 && h * 360 <= 64) {
-                s = 0;
-                v = 1;
-            }
-            return orig(self, sel, h, s, v, a);
-        }));
-    }
-    {
-        typedef UIColor *(*Dynamic)(id, SEL, UIColor * (^)(UITraitCollection *));
-        SEL sel = @selector(initWithDynamicProvider:);
-        Method m = class_getInstanceMethod(cls, sel);
-        __block Dynamic orig = (Dynamic)method_getImplementation(m);
-        method_setImplementation(m, imp_implementationWithBlock(^UIColor *(id self, UIColor * (^provider)(UITraitCollection *)) {
-            UIColor * (^wrapped)(UITraitCollection *) = provider ? ^UIColor *(UITraitCollection *traits) {
-                return whiteIfYellow(provider(traits));
-            } : nil;
-            return orig(self, sel, wrapped);
-        }));
-    }
-    {
-        typedef UIColor *(*Named)(id, SEL, NSString *, NSBundle *, UITraitCollection *);
-        SEL sel = @selector(colorNamed:inBundle:compatibleWithTraitCollection:);
-        Method m = class_getInstanceMethod(meta, sel);
-        __block Named orig = (Named)method_getImplementation(m);
-        method_setImplementation(m, imp_implementationWithBlock(^UIColor *(id self, NSString *name, NSBundle *bundle, UITraitCollection *traits) {
-            UIColor *color = orig(self, sel, name, bundle, traits);
+    SEL classRGBA = @selector(colorWithRed:green:blue:alpha:);
+    swapOwn(meta, classRGBA, ^id(IMP orig) { return rgbaBlock(classRGBA, orig); });
+    SEL named = @selector(colorNamed:inBundle:compatibleWithTraitCollection:);
+    swapOwn(meta, named, ^id(IMP imp) {
+        UIColor *(*orig)(id, SEL, NSString *, NSBundle *, UITraitCollection *) = (UIColor * (*)(id, SEL, NSString *, NSBundle *, UITraitCollection *))imp;
+        return ^UIColor *(id self, NSString *name, NSBundle *bundle, UITraitCollection *traits) {
+            UIColor *color = orig(self, named, name, bundle, traits);
             if (!color) return color;
             // A catalogue colour may differ for light and dark: each look is checked as it is asked for.
             return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *asked) {
                 return whiteIfYellow([color resolvedColorWithTraitCollection:asked]);
             }];
-        }));
-    }
-    {
-        SEL sel = @selector(systemYellowColor);
-        Method m = class_getInstanceMethod(meta, sel);
-        if (m) method_setImplementation(m, imp_implementationWithBlock(^UIColor *(id self) { return UIColor.whiteColor; }));
-    }
+        };
+    });
+    SEL yellow = @selector(systemYellowColor);
+    swapOwn(meta, yellow, ^id(IMP orig) { return ^UIColor *(id self) { return UIColor.whiteColor; }; });
+
+    origCreate = CGColorCreate;
+    origSRGB = CGColorCreateSRGB;
+    origGeneric = CGColorCreateGenericRGB;
+    struct rebinding rebindings[3] = {
+        {"CGColorCreate", (void *)whiteCreate, NULL},
+        {"CGColorCreateSRGB", (void *)whiteSRGB, NULL},
+        {"CGColorCreateGenericRGB", (void *)whiteGeneric, NULL},
+    };
+    memcpy(sColorRebindings, rebindings, sizeof(rebindings));
+    _dyld_register_func_for_add_image(addedImage);
 }

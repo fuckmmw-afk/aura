@@ -43,6 +43,8 @@ void AUSettingsChanged(void);
 #pragma mark - system
 
 void AUSystemStart(void);
+// Crashes written into Aura's log with their stack (Core/AUCrash.m).
+void AUCrashLogInstall(void);
 // Only when "Пауза при перегреве" is on (off by default) and the thermal state is serious or critical: then no
 // parallax and no background work but the palette.
 #define AUKeyThermalPause @"aura.thermalPause"

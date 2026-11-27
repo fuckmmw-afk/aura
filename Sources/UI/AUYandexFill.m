@@ -109,7 +109,9 @@ static CGImageRef blurredCopy(UIImage *image) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGSize size = self.bounds.size;
-    CGFloat high = round(size.height * 0.625);
+    // The whole screen's height (Taurus's field is 0.625 of it, its stage the rest): Aura's fade and the scene's
+    // stage are then the same height as the picture, and nothing ends in a hard edge.
+    CGFloat high = size.height;
     CGFloat side = size.width * AUTune(@"fillCrop");
     [CATransaction begin];
     [CATransaction setDisableActions:YES];

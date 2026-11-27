@@ -9,6 +9,7 @@
 #import <MediaPlayer/MediaPlayer.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <malloc/malloc.h>
 
 NSNotificationName const AUYandexArtworkDidChangeNotification = @"AUYandexArtworkDidChangeNotification";
 
@@ -334,6 +335,7 @@ static NSString *treeOf(UIView *root, int depth, int maxDepth, NSUInteger *lines
 }
 
 static void installGesture(UIView *view);
+static BOOL miniLyricsVisible(void);
 
 // The player's own copy of the playing cover, when it is the same picture bigger than the one in the now playing
 // info: it takes that one's place.
@@ -363,6 +365,29 @@ void AUYandexArtworkViewLaidOut(UIView *view) {
     installGesture(view);
     Ivar ivar = class_getInstanceVariable(object_getClass(view), "carousel");
     id carousel = ivar ? object_getIvar(view, ivar) : nil;
+    // 8.22: `carousel` is a PlayerCoversCarouselView holding the collection view.
+    if ([carousel isKindOfClass:UIView.class] && ![carousel isKindOfClass:UICollectionView.class]) {
+        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:carousel];
+        id found = nil;
+        for (NSUInteger seen = 0; queue.count && seen < 30 && !found; seen++) {
+            UIView *v = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if ([v isKindOfClass:UICollectionView.class]) found = v;
+            else [queue addObjectsFromArray:v.subviews];
+        }
+        if (found) carousel = found;
+    }
+    static BOOL toldPlace;
+    if (!toldPlace && view.bounds.size.width >= 200) {
+        toldPlace = YES;
+        NSMutableString *chain = [NSMutableString string];
+        for (UIView *v = view; v; v = v.superview) {
+            CGRect r = [v convertRect:v.bounds toView:nil];
+            [chain appendFormat:@"\n  %@ %.0f,%.0f %.0fx%.0f%@", NSStringFromClass(v.class), r.origin.x, r.origin.y, r.size.width, r.size.height,
+                                v.clipsToBounds ? @" clips" : @""];
+        }
+        AULog(@"yandex: the artwork view lies in:%@", chain);
+    }
     NSArray<UIView *> *cells = nil;
     if ([carousel isKindOfClass:UICollectionView.class]) cells = [(UICollectionView *)carousel visibleCells];
     else cells = @[view];
@@ -381,6 +406,20 @@ void AUYandexArtworkViewLaidOut(UIView *view) {
     }
     if (middle && nearest < 20) offerPlayerCopy(middle, [carousel isKindOfClass:UIScrollView.class] ? carousel : nil);
     AUYandexFillUpdate(view, [carousel isKindOfClass:UICollectionView.class] ? carousel : nil);
+    // The cell in the middle: where the app folds its lyrics into the card.
+    UIView *centred = nil;
+    CGFloat best = CGFLOAT_MAX;
+    if ([carousel isKindOfClass:UICollectionView.class]) {
+        for (UICollectionViewCell *cell in [(UICollectionView *)carousel visibleCells]) {
+            CGPoint c = [cell convertPoint:CGPointMake(CGRectGetMidX(cell.bounds), CGRectGetMidY(cell.bounds)) toView:nil];
+            CGFloat d = fabs(c.x - CGRectGetMidX(cell.window.bounds));
+            if (d < best) {
+                best = d;
+                centred = cell;
+            }
+        }
+    }
+    AULyricsMiniUpdate(view, centred, ^BOOL { return miniLyricsVisible(); });
 }
 
 void AUYandexArtworkCellLaidOut(UIView *cell) {
@@ -402,7 +441,31 @@ void AUYandexArtworkCellLaidOut(UIView *cell) {
     }
 }
 
+static __weak UIViewController *sPlayer;
+
+// A Swift object's field read raw, by the offset its ObjC metadata gives; the pointer checked to be a heap object.
+static void *swiftObjectField(id object, const char *name) {
+    if (!object) return NULL;
+    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
+    if (!ivar) return NULL;
+    void *raw = *(void **)((uint8_t *)(__bridge void *)object + ivar_getOffset(ivar));
+    if (!raw || ((uintptr_t)raw & 7) || !malloc_zone_from_ptr(raw)) return NULL;
+    return raw;
+}
+
+// TrackLyricsViewModel.isMiniLyricsVisible: the app's lyrics folded into the cover's card.
+static BOOL miniLyricsVisible(void) {
+    UIViewController *player = sPlayer;
+    void *model = swiftObjectField(player, "trackLyricsViewModel");
+    if (!model) return NO;
+    id object = (__bridge id)model;
+    Ivar flag = class_getInstanceVariable(object_getClass(object), "isMiniLyricsVisible");
+    if (!flag) return NO;
+    return *((uint8_t *)model + ivar_getOffset(flag)) != 0;
+}
+
 void AUYandexPlayerLaidOut(UIViewController *controller) {
+    sPlayer = controller;
     AULyricsPlayerLaidOut(controller);
 }
 

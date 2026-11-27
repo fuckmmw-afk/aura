@@ -261,6 +261,7 @@ static void start(void) {
     @autoreleasepool {
         // Before the app's own code: its colours and its remote command handlers pass through Aura from the start.
         if (AUHostYandex()) {
+            AUCrashLogInstall();
             AUYandexColorsInstall();
             %init(YandexRemote);
         }

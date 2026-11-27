@@ -17,5 +17,7 @@ void AULyricsPlayerLaidOut(UIViewController *controller);
 // A body some download brought: kept if it is the lyrics of the playing song (LRC).
 void AULyricsSawBody(NSData *_Nullable data, NSURL *_Nullable url);
 UIViewController *_Nullable AULyricsSettingsPage(void);
+// The app's lyrics folded up into the cover's card: Aura's over it, in the centred cell's place.
+void AULyricsMiniUpdate(UIView *artworkView, UIView *_Nullable cell, BOOL (^visible)(void));
 
 NS_ASSUME_NONNULL_END

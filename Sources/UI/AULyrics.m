@@ -262,22 +262,16 @@ static void askLRCLIB(NSString *uri) {
 
 #pragma mark - blur
 
+// A blur of its own for each line (a filter object is never shared between layers).
 static NSArray *blurFilter(CGFloat radius) {
     if (radius < 0.3) return nil;
     static Class filterClass;
-    static NSMutableDictionary<NSNumber *, NSArray *> *cache;
     if (!filterClass) filterClass = NSClassFromString(@"CAFilter");
     if (!filterClass) return nil;
-    if (!cache) cache = [NSMutableDictionary dictionary];
-    NSNumber *key = @(round(radius * 4) / 4);
-    NSArray *made = cache[key];
-    if (!made) {
-        id filter = ((id (*)(id, SEL, id))objc_msgSend)(filterClass, NSSelectorFromString(@"filterWithType:"), @"gaussianBlur");
-        [filter setValue:key forKey:@"inputRadius"];
-        made = filter ? @[filter] : @[];
-        cache[key] = made;
-    }
-    return made;
+    id filter = ((id (*)(id, SEL, id))objc_msgSend)(filterClass, NSSelectorFromString(@"filterWithType:"), @"gaussianBlur");
+    if (!filter) return nil;
+    [filter setValue:@(round(radius * 4) / 4) forKey:@"inputRadius"];
+    return @[filter];
 }
 
 static UIImage *blurredCover(UIImage *image) {
@@ -305,8 +299,12 @@ static UIImage *blurredCover(UIImage *image) {
 
 #pragma mark - the view
 
+static void AULyricsMiniRefresh(void);
+
 @interface AULyricsView : UIView <UIGestureRecognizerDelegate>
 @property (nonatomic, weak) UIView *host;
+@property (nonatomic) BOOL mini;                       // in the cover's card (the app's lyrics folded up)
+@property (nonatomic, strong) UIImageView *ownBackdrop; // the mini one's blurred cover, inside it
 @property (nonatomic, strong) UIImageView *backdrop;
 - (void)sync;
 @end
@@ -387,7 +385,7 @@ static UIImage *blurredCover(UIImage *image) {
 }
 
 - (void)updateBackdrop {
-    UIImageView *backdrop = self.backdrop;
+    UIImageView *backdrop = self.backdrop ?: self.ownBackdrop;
     if (!backdrop) return;
     UIImage *image = AUYandexArtwork(NULL, NULL, NULL);
     if (image && image != _backdropOf) {
@@ -429,7 +427,9 @@ static UIImage *blurredCover(UIImage *image) {
         return;
     }
     UIFont *font = lyricFont();
-    CGFloat width = MAX(40, self.bounds.size.width - 48);
+    CGFloat inset = self.mini ? 20 : 24;
+    if (self.mini) font = [font fontWithSize:round(font.pointSize * 0.72)];
+    CGFloat width = MAX(40, self.bounds.size.width - 2 * inset);
     NSMutableParagraphStyle *paragraph = [NSMutableParagraphStyle new];
     paragraph.alignment = lyricAlignment();
     paragraph.lineBreakMode = NSLineBreakByWordWrapping;
@@ -447,7 +447,7 @@ static UIImage *blurredCover(UIImage *image) {
         }
         CGSize size = [label sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)];
         size.width = width;
-        label.frame = (CGRect){CGPointMake(24, 0), size};
+        label.frame = (CGRect){CGPointMake(inset, 0), size};
         [self addSubview:label];
         [_labels addObject:label];
         [_sizes addObject:[NSValue valueWithCGSize:size]];
@@ -485,6 +485,10 @@ static UIImage *blurredCover(UIImage *image) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     _edges.frame = self.bounds;
+    if (self.ownBackdrop) {
+        self.ownBackdrop.frame = self.bounds;
+        [self sendSubviewToBack:self.ownBackdrop];
+    }
     _empty.frame = CGRectInset(self.bounds, 32, 0);
     if (fabs(_laidWidth - self.bounds.size.width) > 0.5) [self rebuild];
 }
@@ -529,8 +533,9 @@ static UIImage *blurredCover(UIImage *image) {
 
 // Every line where it goes for the current one, and dimmed, blurred and lit by how far it is from it.
 - (void)place:(BOOL)animated {
-    CGFloat H = self.bounds.size.height, gap = spacing();
+    CGFloat H = self.bounds.size.height, gap = spacing() * (self.mini ? 0.6 : 1);
     NSInteger count = (NSInteger)_labels.count;
+    if (_current < 0 || _current >= count) return;
     CGFloat y0 = H * anchor() + _userOffset;
     // The current line's top at the anchor, the rest stacked above and below it.
     CGFloat ys[count];
@@ -549,7 +554,7 @@ static UIImage *blurredCover(UIImage *image) {
     for (NSInteger i = 0; i < count; i++) {
         UILabel *label = _labels[(NSUInteger)i];
         CGSize size = [_sizes[(NSUInteger)i] CGSizeValue];
-        CGFloat x = 24;
+        CGFloat x = self.mini ? 20 : 24;
         BOOL near = ys[i] > -H && ys[i] < 2 * H;
         label.hidden = !near;
         if (!near) {
@@ -669,6 +674,7 @@ static UIImage *blurredCover(UIImage *image) {
 }
 
 - (void)panned:(UIPanGestureRecognizer *)pan {
+    if (_current < 0) return;
     CGFloat dy = [pan translationInView:self].y;
     [pan setTranslation:CGPointZero inView:self];
     _userOffset += dy;
@@ -678,6 +684,10 @@ static UIImage *blurredCover(UIImage *image) {
 
 // Where the app's lyrics view is, and whether it shows: this view takes its frame and its alpha.
 - (void)sync {
+    if (self.mini) {
+        AULyricsMiniRefresh();
+        return;
+    }
     UIView *host = self.host;
     if (!host || !host.window || !self.superview) {
         self.hidden = YES;
@@ -783,6 +793,68 @@ void AULyricsPlayerLaidOut(UIViewController *controller) {
 }
 
 void AULyricsStart(void) {
+}
+
+#pragma mark - folded up, in the cover's card
+
+static __weak UIView *sMiniArtwork, *sMiniCell;
+static AULyricsView *sMini;
+static BOOL (^sMiniVisible)(void);
+
+static AULyricsView *miniView(void) {
+    if (sMini) return sMini;
+    AULyricsView *view = [[AULyricsView alloc] initWithFrame:CGRectZero];
+    view.mini = YES;
+    // Taps go through to the card underneath (the app's own "full screen" button is there).
+    view.userInteractionEnabled = NO;
+    view.layer.cornerRadius = 16;
+    view.layer.cornerCurve = kCACornerCurveContinuous;
+    UIImageView *backdrop = [UIImageView new];
+    backdrop.contentMode = UIViewContentModeScaleAspectFill;
+    backdrop.clipsToBounds = YES;
+    UIView *shade = [UIView new];
+    shade.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
+    shade.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [backdrop addSubview:shade];
+    UIImageView *expand = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.left.and.arrow.down.right"
+        withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightSemibold]]];
+    expand.tintColor = [UIColor colorWithWhite:1 alpha:0.7];
+    expand.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin;
+    expand.tag = 77;
+    [backdrop addSubview:expand];
+    view.ownBackdrop = backdrop;
+    view.layer.mask = nil;   // the card keeps its edges; the text is clipped by its corners
+    [view insertSubview:backdrop atIndex:0];
+    [view updateBackdrop];
+    sMini = view;
+    return view;
+}
+
+static void AULyricsMiniRefresh(void) {
+    AULyricsView *view = sMini;
+    UIView *artwork = sMiniArtwork, *cell = sMiniCell;
+    BOOL want = AUEnabled(AUKeyLyrics) && artwork.window && cell.window && sMiniVisible && sMiniVisible();
+    if (!view) return;
+    if (!want) {
+        view.hidden = YES;
+        return;
+    }
+    if (view.superview != artwork) [artwork addSubview:view];
+    else if (artwork.subviews.lastObject != view) [artwork bringSubviewToFront:view];
+    CGRect frame = [artwork convertRect:cell.bounds fromView:cell];
+    if (!CGRectEqualToRect(view.frame, frame)) view.frame = frame;
+    UIView *expand = [view.ownBackdrop viewWithTag:77];
+    expand.frame = CGRectMake(frame.size.width - 34, 16, 18, 18);
+    view.hidden = NO;
+}
+
+void AULyricsMiniUpdate(UIView *artworkView, UIView *cell, BOOL (^visible)(void)) {
+    if (!AUEnabled(AUKeyLyrics) && !sMini) return;
+    sMiniArtwork = artworkView;
+    if (cell) sMiniCell = cell;
+    sMiniVisible = [visible copy];
+    if (visible && visible() && AUEnabled(AUKeyLyrics)) miniView();
+    AULyricsMiniRefresh();
 }
 
 #pragma mark - settings
