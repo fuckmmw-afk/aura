@@ -48,6 +48,12 @@ typedef struct {
 // over (premultiplied).
 void AUSceneDraw3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect square, AUScene *scene, AUCamera camera,
                    AUSceneSource source);
+// The solid surface (AUScene.front, premultiplied 4-byte pixels, width x height: the square and the room below it)
+// over `frame`, by its depth (depthSide x depthHigh, the same picture): spread between neighbours, torn where their
+// depths differ by more than `tear` (0...1); the nearest wins. `square` is the cover's square in the frame.
+void AUSceneSplat3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect square, AUCamera camera,
+                    const uint8_t *pixels, size_t row, size_t width, size_t height,
+                    const uint8_t *depth, size_t depthSide, size_t depthHigh, double tear);
 // The extent of what is not transparent in a side x side RGBA picture, picture units.
 CGRect AUSceneAlphaBox(const uint8_t *pixels, size_t row, size_t side);
 

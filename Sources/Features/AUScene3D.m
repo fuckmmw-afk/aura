@@ -7,7 +7,9 @@
 AUCamera AUSceneCamera(AUScene *scene, CGPoint tilt, double strength) {
     AUCamera c;
     double background = scene.backgroundDepth, front = background + 0.3;
-    if (scene.layers.count) {
+    if (scene.solid) {
+        front = scene.nearDepth;
+    } else if (scene.layers.count) {
         front = 0;
         for (AUSceneLayer *layer in scene.layers) front = MAX(front, layer.depth);
     }
@@ -218,4 +220,104 @@ CGRect AUSceneAlphaBox(const uint8_t *pixels, size_t row, size_t side) {
     if (maxX < 0) return CGRectZero;
     return CGRectMake(minX / (double)side - 0.5, minY / (double)side - 0.5, (maxX - minX + 1) / (double)side,
                       (maxY - minY + 1) / (double)side);
+}
+
+// The solid surface, splatted: every source pixel goes where the camera sees it, the nearest wins, and between two
+// neighbours it is spread only when their depths do not jump — so a tear opens as a gap (the background under it,
+// drawn before) instead of stretching. The surface is laid into a scratch frame first and put over `frame` once, by
+// its alpha (premultiplied), so a pixel written twice is not blended twice.
+void AUSceneSplat3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect square, AUCamera camera,
+                    const uint8_t *pixels, size_t row, size_t width, size_t height,
+                    const uint8_t *depth, size_t depthSide, size_t depthHigh, double tear) {
+    if (!frame || !pixels || !depth || width < 2 || height < 2 || square.size.width < 1) return;
+    AUTurn turn = turnOf(camera);
+    // Picture units: the side is 1, the cover's middle (0, 0); rows below the square go on past 0.5.
+    const double midX = CGRectGetMidX(square), sw = square.size.width, originY = CGRectGetMinY(square);
+    float *zbuf = malloc(sizeof(float) * w * h);
+    uint32_t *color = calloc(w * h, 4);
+    if (!zbuf || !color) {
+        free(zbuf);
+        free(color);
+        return;
+    }
+    for (size_t i = 0; i < w * h; i++) zbuf[i] = -1e9f;
+    const int T = (int)lround(tear * 255);
+    // Where each source pixel lands, a row at a time (its own and the next row's, for the spread).
+    const size_t chunks = 16, per = (height + chunks - 1) / chunks;
+    dispatch_apply(chunks, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t chunk) {
+        size_t y0 = chunk * per, y1 = MIN(height, y0 + per);
+        if (y0 >= y1) return;
+        double *ax = malloc(sizeof(double) * width * 2), *ay = malloc(sizeof(double) * width * 2);
+        float *az = malloc(sizeof(float) * width * 2);
+        uint8_t *ad = malloc(width * 2);
+        for (size_t y = y0; y < y1; y++) {
+            for (int r = 0; r < 2; r++) {
+                size_t yy = MIN(height - 1, y + r);
+                size_t dy = MIN(depthHigh - 1, (size_t)((yy + 0.5) * depthHigh / height));
+                for (size_t x = 0; x < width; x++) {
+                    size_t dx = MIN(depthSide - 1, (size_t)((x + 0.5) * depthSide / width));
+                    uint8_t dv = depth[dy * depthSide + dx];
+                    double z = AUCameraZ(camera, dv / 255.0);
+                    double qx = (x + 0.5) / width - 0.5, qy = (yy + 0.5) / width - 0.5;
+                    double sx, sy;
+                    project(turn, qx, qy, z, &sx, &sy);
+                    ax[r * width + x] = midX + sx * sw;
+                    ay[r * width + x] = originY + (sy + 0.5) * sw;
+                    az[r * width + x] = (float)z;
+                    ad[r * width + x] = dv;
+                }
+            }
+            const uint8_t *src = pixels + y * row;
+            for (size_t x = 0; x < width; x++) {
+                double x0 = ax[x], y0p = ay[x];
+                double minX = x0, maxX = x0, minY = y0p, maxY = y0p;
+                // Spread toward the right and the next row's neighbours that do not tear away.
+                if (x + 1 < width && abs((int)ad[x + 1] - (int)ad[x]) <= T) {
+                    minX = MIN(minX, ax[x + 1]); maxX = MAX(maxX, ax[x + 1]);
+                    minY = MIN(minY, ay[x + 1]); maxY = MAX(maxY, ay[x + 1]);
+                }
+                if (y + 1 < height && abs((int)ad[width + x] - (int)ad[x]) <= T) {
+                    minX = MIN(minX, ax[width + x]); maxX = MAX(maxX, ax[width + x]);
+                    minY = MIN(minY, ay[width + x]); maxY = MAX(maxY, ay[width + x]);
+                }
+                long px0 = (long)floor(minX), px1 = (long)floor(maxX), py0 = (long)floor(minY), py1 = (long)floor(maxY);
+                if (px1 - px0 > 6) px1 = px0 + 6;
+                if (py1 - py0 > 6) py1 = py0 + 6;
+                if (px1 < 0 || py1 < 0 || px0 >= (long)w || py0 >= (long)h) continue;
+                float z = az[x];
+                uint32_t c;
+                memcpy(&c, src + x * 4, 4);
+                for (long py = MAX(0L, py0); py <= MIN((long)h - 1, py1); py++) {
+                    for (long px = MAX(0L, px0); px <= MIN((long)w - 1, px1); px++) {
+                        size_t i = (size_t)py * w + (size_t)px;
+                        if (z >= zbuf[i]) {
+                            zbuf[i] = z;
+                            color[i] = c;
+                        }
+                    }
+                }
+            }
+        }
+        free(ax); free(ay); free(az); free(ad);
+    });
+    dispatch_apply(h, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t y) {
+        uint8_t *out = frame + y * frameRow;
+        for (size_t x = 0; x < w; x++) {
+            size_t i = y * w + x;
+            if (zbuf[i] < -1e8f) continue;
+            uint8_t px[4];
+            memcpy(px, &color[i], 4);
+            // Premultiplied; the alpha is the 4th byte in RGBA and in BGRA (little-endian ARGB) alike.
+            uint32_t alpha = px[3];
+            if (!alpha) continue;
+            uint8_t *o = out + x * 4;
+            if (alpha == 255) {
+                memcpy(o, px, 4);
+                continue;
+            }
+            for (int c = 0; c < 4; c++) o[c] = (uint8_t)MIN(255u, px[c] + (o[c] * (255 - alpha) + 127) / 255);
+        }
+    });
+    free(zbuf);
+    free(color);
 }

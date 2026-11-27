@@ -875,6 +875,123 @@ static CGImageRef plateDepthOf(const uint8_t *depth, const uint8_t *holes, size_
     return small;
 }
 
+#pragma mark - the solid scene
+
+static void median3(uint8_t *d, size_t w, size_t h) {
+    uint8_t *out = malloc(w * h);
+    memcpy(out, d, w * h);
+    for (size_t y = 1; y + 1 < h; y++) {
+        for (size_t x = 1; x + 1 < w; x++) {
+            uint8_t v[9];
+            int k = 0;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++) v[k++] = d[(y + dy) * w + x + dx];
+            for (int i = 1; i < 9; i++) {
+                uint8_t key = v[i];
+                int j = i - 1;
+                while (j >= 0 && v[j] > key) { v[j + 1] = v[j]; j--; }
+                v[j + 1] = key;
+            }
+            out[y * w + x] = v[4];
+        }
+    }
+    memcpy(d, out, w * h);
+    free(out);
+}
+
+static uint32_t oddKernel(double radius) {
+    return (uint32_t)(2 * MAX(0L, lround(radius)) + 1);
+}
+
+// The cover's depth (side x side) made into one surface that tears cleanly, and what a tear can open.
+//   front: every soft ramp the model leaves at an edge snapped to one side or the other (nothing half-way to smear),
+//          then the nearer side grown by `tearGrow` across every jump: the model's edge lies a little inside the thing,
+//          and its rim, left at the far depth, stayed behind as a still outline.
+//   holes: the near side of every jump, `tearBand` deep: what a gap can uncover at a full swing; LaMa paints it.
+//   back:  the depth under the painted holes (the far side carried in), smooth: the plate the gaps show.
+static void solidDepths(const uint8_t *in, size_t side, NSMutableData *front, NSMutableData *holes, NSMutableData *back) {
+    const size_t n = side * side;
+    const int T = (int)lround(AUTune(@"tear") * 255);
+    uint8_t *d = front.mutableBytes, *h = holes.mutableBytes, *b = back.mutableBytes;
+    memcpy(d, in, n);
+    uint8_t *mn = malloc(n), *mx = malloc(n), *t = malloc(n), *edges = malloc(n), *behind = malloc(n);
+    vImage_Buffer D = {d, side, side, side}, MN = {mn, side, side, side}, MX = {mx, side, side, side};
+    vImage_Buffer TT = {t, side, side, side}, E = {edges, side, side, side}, BH = {behind, side, side, side}, BB = {b, side, side, side};
+    uint32_t k = oddKernel(side * 0.007);   // 9 px at 640
+    vImageMin_Planar8(&D, &MN, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    vImageMax_Planar8(&D, &MX, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    for (size_t i = 0; i < n; i++) {
+        if (mx[i] - mn[i] > T) d[i] = d[i] - mn[i] < mx[i] - d[i] ? mn[i] : mx[i];
+    }
+    median3(d, side, side);
+    uint32_t g = oddKernel(side * AUTune(@"tearGrow") / 100);
+    if (g > 1) {
+        vImageMax_Planar8(&D, &MX, NULL, 0, 0, g, g, kvImageEdgeExtend);
+        for (size_t i = 0; i < n; i++) if (mx[i] - d[i] > T) d[i] = mx[i];
+    }
+    // Where the surface tears, and the band a tear can open on its near side.
+    vImageMin_Planar8(&D, &MN, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    vImageMax_Planar8(&D, &MX, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    for (size_t i = 0; i < n; i++) t[i] = mx[i] - mn[i] > T ? 255 : 0;
+    double bandR = side * AUTune(@"tearBand") / 100;
+    uint32_t band = oddKernel(bandR);
+    vImageMax_Planar8(&TT, &E, NULL, 0, 0, band, band, kvImageEdgeExtend);
+    vImageMin_Planar8(&D, &BH, NULL, 0, 0, band, band, kvImageEdgeExtend);
+    uint32_t soft = (uint32_t)(bandR * 1.6) | 1;
+    vImageTentConvolve_Planar8(&BH, &TT, NULL, 0, 0, soft, soft, 0, kvImageEdgeExtend);
+    for (size_t i = 0; i < n; i++) behind[i] = MIN(t[i], d[i]);
+    for (size_t i = 0; i < n; i++) t[i] = edges[i] && d[i] - behind[i] > T * 0.8 ? 255 : 0;
+    uint32_t widen = oddKernel(side * 0.007);
+    vImage_Buffer H = {h, side, side, side};
+    vImageMax_Planar8(&TT, &H, NULL, 0, 0, widen, widen, kvImageEdgeExtend);
+    for (size_t i = 0; i < n; i++) t[i] = h[i] ? behind[i] : d[i];
+    uint32_t smooth = (uint32_t)(side * 0.023) | 1;
+    vImageTentConvolve_Planar8(&TT, &BB, NULL, 0, 0, smooth, smooth, 0, kvImageEdgeExtend);
+    free(mn); free(mx); free(t); free(edges); free(behind);
+}
+
+// The depth carried down the room painted below the cover: each column's last rows, coming a little nearer (a floor).
+static NSData *depthGoingDown(const uint8_t *square, size_t side, size_t high) {
+    NSMutableData *out = [NSMutableData dataWithLength:side * high];
+    uint8_t *o = out.mutableBytes;
+    memcpy(o, square, side * side);
+    if (high <= side) return out;
+    double rise = AUTune(@"floorRise") * 255;
+    size_t rows = MIN((size_t)8, side);
+    for (size_t x = 0; x < side; x++) {
+        double last = 0;
+        for (size_t y = side - rows; y < side; y++) last += square[y * side + x];
+        last /= rows;
+        for (size_t y = side; y < high; y++) {
+            double v = last + rise * (y - side) / (double)(high - side);
+            o[y * side + x] = (uint8_t)MAX(0.0, MIN(255.0, v));
+        }
+    }
+    // Softened across: each carried column is its own otherwise.
+    NSMutableData *tmp = [NSMutableData dataWithLength:side * (high - side)];
+    vImage_Buffer A = {o + side * side, high - side, side, side}, B = {tmp.mutableBytes, high - side, side, side};
+    uint32_t k = (uint32_t)(side * 0.03) | 1;
+    vImageTentConvolve_Planar8(&A, &B, NULL, 0, 0, k, k, 0, kvImageEdgeExtend);
+    memcpy(o + side * side, tmp.bytes, side * (high - side));
+    return out;
+}
+
+static double percentileShare(const uint8_t *mask, size_t n) {
+    size_t on = 0;
+    for (size_t i = 0; i < n; i++) on += mask[i] >= 128;
+    return n ? on / (double)n : 0;
+}
+
+static int percentileOf(const uint8_t *p, size_t n, double share) {
+    size_t histogram[256] = {0}, seen = 0;
+    for (size_t i = 0; i < n; i++) histogram[p[i]]++;
+    for (int v = 0; v < 256; v++) {
+        seen += histogram[v];
+        if (seen >= n * share) return v;
+    }
+    return 255;
+}
+
 AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSString **log) {
     if (!cover) return nil;
     double started = AUNowMs();
@@ -882,16 +999,32 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     size_t side = MIN((size_t)1024, MIN(CGImageGetWidth(cover), CGImageGetHeight(cover)));
     CGImageRef square = AUImageResized(cover, side, side);
     if (!square) return nil;
+    // «Сплошная сцена»: nothing is cut out; the cover's depth is one surface (see solidDepths).
+    BOOL solid = depth && AUTuneOn(@"surface");
     size_t mw = 0, mh = 0;
     NSArray<NSData *> *masks = @[];
-    if (@available(iOS 17.0, *)) masks = objectMasks(square, peopleOnly, &mw, &mh);
+    if (!solid) {
+        if (@available(iOS 17.0, *)) masks = objectMasks(square, peopleOnly, &mw, &mh);
+    }
     if (mw != side || mh != side) {
         masks = @[];
         mw = mh = side;
     }
     size_t n = side * side;
     NSData *depthMap = depthBytes(depth, side, side);
-    if (!masks.count && depthMap) {
+    // The solid surface's depth at up to 640 px (the numbers are shares of the side).
+    const size_t ws = MIN(side, (size_t)640);
+    NSMutableData *solidFront = nil, *solidHoles = nil, *solidBack = nil;
+    if (solid && depthMap) {
+        NSData *small = depthBytes(depth, ws, ws);
+        solidFront = [NSMutableData dataWithLength:ws * ws];
+        solidHoles = [NSMutableData dataWithLength:ws * ws];
+        solidBack = [NSMutableData dataWithLength:ws * ws];
+        solidDepths(small.bytes, ws, solidFront, solidHoles, solidBack);
+    } else {
+        solid = NO;
+    }
+    if (!masks.count && depthMap && !solid) {
         NSData *split = depthSplit(depthMap.bytes, side, side);
         if (split) masks = @[split];
     }
@@ -927,6 +1060,16 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         for (size_t i = 0; i < n; i++) area += m[i] >= 128;
         largest = MAX(largest, area / (double)n);
     }
+    if (solid) {
+        // Nothing is cut out; a close-up is a near part of the depth that fills much of the cover.
+        NSData *split = depthSplit(depthMap.bytes, side, side);
+        if (split) {
+            const uint8_t *m = split.bytes;
+            size_t area = 0;
+            for (size_t i = 0; i < n; i++) area += m[i] >= 128;
+            largest = area / (double)n;
+        }
+    }
     double styleSwing = 1, styleDeep = 1, styleRelief = 1;
     NSString *styleName = @"обычная";
     BOOL flat = spread < 0.28;
@@ -944,7 +1087,7 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     BOOL segmented = NO;
     NSString *samLog = nil;
     NSUInteger most = (NSUInteger)lround(AUTune(@"maxObjects"));
-    if (!peopleOnly && AUTuneOn(@"sam") && masks.count < most && !(adapt && flat)) {
+    if (!solid && !peopleOnly && AUTuneOn(@"sam") && masks.count < most && !(adapt && flat)) {
         NSMutableData *held = [NSMutableData dataWithLength:n];
         uint8_t *h = held.mutableBytes;
         for (NSData *mask in masks) {
@@ -971,6 +1114,14 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     vImageMax_Planar8(&ub, &gb, NULL, 0, 0, grow, grow, kvImageEdgeExtend);
     uint8_t *g = grown.mutableBytes;
     for (size_t i = 0; i < n; i++) g[i] = g[i] >= 64 ? 255 : 0;
+    if (solid) {
+        // The solid scene's holes: the bands its tears can open.
+        CGImageRef holesSmall = AUGrayImage(solidHoles.bytes, ws, ws);
+        NSData *holesAtSide = depthBytes(holesSmall, side, side);
+        CGImageRelease(holesSmall);
+        const uint8_t *hs = holesAtSide.bytes;
+        for (size_t i = 0; i < n; i++) g[i] = hs && hs[i] >= 128 ? 255 : 0;
+    }
 
     // The canvas is the cover itself, square: nothing is added around it, so it frames as Taurus frames the cover.
     size_t cw = side, ch = side;
@@ -1007,7 +1158,7 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         // The quick fallback: the cover stretched over the canvas and blurred, and the objects' room filled from around it.
         CGContextDrawImage(canvas, CGRectMake(0, 0, cw, ch), square);
         CGImageRef holesImage = AUGrayImage(g, side, side);
-        CGImageRef filled = masks.count ? inpaintedBackground(square, holesImage) : NULL;
+        CGImageRef filled = masks.count || solid ? inpaintedBackground(square, holesImage) : NULL;
         CGImageRelease(holesImage);
         if (filled) {
             CGContextDrawImage(canvas, flipped(squareRect, ch), filled);
@@ -1108,6 +1259,15 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
             CGContextDrawImage(tc, CGRectMake(0, tallHigh - side, side, side), background);
             CGContextDrawImage(tc, CGRectMake(0, 0, side, CGImageGetHeight(below)), below);
             CGImageRef tall = CGBitmapContextCreateImage(tc);
+            if (solid && tall) {
+                // The surface: the cover itself over the same room below.
+                CGContextDrawImage(tc, CGRectMake(0, tallHigh - side, side, side), square);
+                CGImageRef front = CGBitmapContextCreateImage(tc);
+                if (front) {
+                    scene.front = [UIImage imageWithCGImage:front];
+                    CGImageRelease(front);
+                }
+            }
             CGContextRelease(tc);
             CGImageRelease(below);
             if (tall) {
@@ -1117,11 +1277,24 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
             }
         }
         if (!scene.tall) tallHigh = side;
+        if (solid) {
+            if (!scene.front) scene.front = [UIImage imageWithCGImage:square];
+            size_t wsHigh = (size_t)lround(ws * tallHigh / (double)side);
+            NSData *frontTall = depthGoingDown(solidFront.bytes, ws, wsHigh);
+            NSData *backTall = depthGoingDown(solidBack.bytes, ws, wsHigh);
+            CGImageRef fd = AUGrayImage(frontTall.bytes, ws, wsHigh), bd = AUGrayImage(backTall.bytes, ws, wsHigh);
+            if (fd) scene.frontDepth = [UIImage imageWithCGImage:fd];
+            if (bd) scene.plateDepth = [UIImage imageWithCGImage:bd];
+            if (fd) CGImageRelease(fd);
+            if (bd) CGImageRelease(bd);
+            scene.nearDepth = percentileOf(solidFront.bytes, ws * ws, 0.95) / 255.0;
+            scene.tearJump = AUTune(@"tear");
+        }
         NSMutableData *tallDepth = [NSMutableData dataWithLength:side * tallHigh], *tallHoles = [NSMutableData dataWithLength:side * tallHigh];
         memcpy(tallDepth.mutableBytes, depthMap.bytes, n);
         memcpy(tallHoles.mutableBytes, g, n);
         for (size_t y = side; y < tallHigh; y++) memcpy((uint8_t *)tallDepth.mutableBytes + y * side, (const uint8_t *)depthMap.bytes + (side - 1) * side, side);
-        CGImageRef plate = plateDepthOf(tallDepth.bytes, tallHoles.bytes, side, tallHigh);
+        CGImageRef plate = solid ? NULL : plateDepthOf(tallDepth.bytes, tallHoles.bytes, side, tallHigh);
         if (plate) {
             scene.plateDepth = [UIImage imageWithCGImage:plate];
             CGImageRelease(plate);
@@ -1132,7 +1305,8 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     CGImageRelease(square);
     scene.square = squareRect;
     scene.layers = layers;
-    scene.backgroundDepth = backgroundDepth;
+    // The solid surface's own far side (its 35th percentile) is what the camera's window is measured from.
+    scene.backgroundDepth = solid && solidFront ? percentileOf(solidFront.bytes, ws * ws, 0.35) / 255.0 : backgroundDepth;
     scene.inpainted = inpainted;
     scene.segmented = segmented;
     scene.tune = AUTuneSignature(AUTuneScene);
@@ -1142,7 +1316,10 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
     scene.styleName = [NSString stringWithFormat:@"%@ (глубина %.2f, крупнейший %.0f%%)", styleName, spread, largest * 100];
     NSMutableArray *depths = [NSMutableArray array];
     for (AUSceneLayer *layer in layers) [depths addObject:[NSString stringWithFormat:@"%.2f", layer.depth]];
-    NSString *summary = [NSString stringWithFormat:@"scene %zu px: %lu objects (depth %@ over %.2f), background %@ in %.0f ms",
+    NSString *summary = solid ? [NSString stringWithFormat:@"scene %zu px: solid surface (holes %.1f%%, near %.2f, far side %.2f), background %@ in %.0f ms",
+                                 side, 100.0 * percentileShare(g, n), scene.nearDepth, scene.backgroundDepth,
+                                 inpainted ? @"painted by LaMa" : [@"blur fill: " stringByAppendingString:why ?: @"?"], AUNowMs() - started] :
+        [NSString stringWithFormat:@"scene %zu px: %lu objects (depth %@ over %.2f), background %@ in %.0f ms",
                          side, (unsigned long)layers.count, [depths componentsJoinedByString:@" "], backgroundDepth,
                          inpainted ? @"painted by LaMa" : [@"blur fill: " stringByAppendingString:why ?: @"?"], AUNowMs() - started];
     if (samLog) summary = [summary stringByAppendingFormat:@"; %@", samLog];

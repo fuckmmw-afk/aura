@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import "Core/AUCore.h"
 #import "Core/AUModelManager.h"
+#import "Core/AUTune.h"
 #import "Features/AUImage.h"
 #import "Features/AUPalette.h"
 #import "Features/AUVision.h"
@@ -37,6 +38,63 @@ static BOOL waitForModel(NSString *modelID) {
     return NO;
 }
 
+// The solid scene's surface over what is drawn in `c` (the camera's view), as the lock clip does it on the CPU.
+static void splatFront(CGContextRef c, CGRect square, AUScene *scene, AUCamera camera, size_t width) {
+    if (!scene.solid || !scene.frontBytes) return;
+    CGImageRef f = scene.front.CGImage;
+    size_t fw = width, fh = (size_t)lround(fw * CGImageGetHeight(f) / (double)CGImageGetWidth(f));
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef fc = CGBitmapContextCreate(NULL, fw, fh, 8, 0, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    CGContextSetInterpolationQuality(fc, kCGInterpolationHigh);
+    CGContextDrawImage(fc, CGRectMake(0, 0, fw, fh), f);
+    AUSceneSplat3D(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), CGBitmapContextGetWidth(c), CGBitmapContextGetHeight(c),
+                   square, camera, CGBitmapContextGetData(fc), CGBitmapContextGetBytesPerRow(fc), fw, fh, scene.frontBytes.bytes,
+                   scene.frontSide, scene.frontHigh, scene.tearJump);
+    CGContextRelease(fc);
+}
+
+// Fill as the phone draws it: the app's own Metal renderer (the surface, the blur of the finished frame) into the
+// picture's rect on a 402 x 874 pt screen at 2x, then the fade into the player's colour from fadeFrom to fadeTo.
+static CGImageRef fillGPU(AUScene *scene, CGPoint tilt) {
+    if (![AUSceneRenderer supported]) return NULL;
+    const double W = 402, H = 874, scale = 2;
+    AUSceneRenderer *r = [AUSceneRenderer new];
+    [r setScene:scene tall:YES];
+    r.tilt = tilt;
+    r.zoom = 1;
+    double side0 = W * AUTune(@"fillCrop"), side = side0 * AUSceneZoom(1), tall = r.frameTall;
+    CGRect pic = CGRectMake((W - side) / 2, (side0 - side) / 2, side, side * tall);
+    double f1 = AUTune(@"blur1From"), t1 = MAX(f1 + 0.01, AUTune(@"blur1To")), f2 = AUTune(@"blur2From"), t2 = MAX(f2 + 0.01, AUTune(@"blur2To"));
+    double y = pic.origin.y, h = pic.size.height;
+    [r setBlurRamp1:CGPointMake((f1 * H - y) / h, (t1 * H - y) / h) size1:AUTune(@"blur1Size") / 100
+              ramp2:CGPointMake((f2 * H - y) / h, (t2 * H - y) / h) size2:AUTune(@"blur2Size") / 100];
+    CGImageRef image = NULL;
+    size_t pw = (size_t)lround(side * scale), ph = (size_t)lround(side * tall * scale);
+    for (int wait = 0; wait < 80 && !(image = [r renderImageWidth:pw height:ph]); wait++) {
+        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    }
+    if (!image) return NULL;
+    size_t sw = (size_t)(W * scale), sh = (size_t)(H * scale);
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef c = CGBitmapContextCreate(NULL, sw, sh, 8, 0, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGContextSetRGBFillColor(c, 0.07, 0.07, 0.08, 1);
+    CGContextFillRect(c, CGRectMake(0, 0, sw, sh));
+    CGContextDrawImage(c, CGRectMake(pic.origin.x * scale, (H - pic.origin.y - pic.size.height) * scale, pic.size.width * scale,
+                                     pic.size.height * scale), image);
+    CGImageRelease(image);
+    double from = AUTune(@"fadeFrom"), to = AUTune(@"fadeTo");
+    CGFloat comps[8] = {0.07, 0.07, 0.08, 0, 0.07, 0.07, 0.08, 1};
+    CGFloat locs[2] = {0, 1};
+    CGGradientRef g = CGGradientCreateWithColorComponents(space, comps, locs, 2);
+    CGContextDrawLinearGradient(c, g, CGPointMake(0, (1 - from) * sh), CGPointMake(0, (1 - to) * sh), kCGGradientDrawsAfterEndLocation);
+    CGGradientRelease(g);
+    CGColorSpaceRelease(space);
+    CGImageRef out = CGBitmapContextCreateImage(c);
+    CGContextRelease(c);
+    return out;
+}
+
 // The app's look, on the CPU as the shader draws it (AUScene3D): the square aspect-filled into `size`, zoomed for
 // the swing, the background and every object by its own relief, seen by the camera at `tilt`.
 static CGImageRef sceneFrame(AUScene *scene, CGPoint tilt, CGSize size) {
@@ -64,6 +122,7 @@ static CGImageRef sceneFrame(AUScene *scene, CGPoint tilt, CGSize size) {
         CGContextRelease(o);
     }
     CGColorSpaceRelease(space);
+    splatFront(c, square, scene, camera, 640);
     CGImageRef out = CGBitmapContextCreateImage(c);
     CGContextRelease(c);
     return out;
@@ -97,6 +156,7 @@ static CGImageRef fillFrame(AUScene *scene, CGPoint tilt, CGSize size) {
         CGContextRelease(o);
     }
     CGColorSpaceRelease(space);
+    splatFront(c, square, scene, camera, 640);
     CGImageRef out = CGBitmapContextCreateImage(c);
     CGContextRelease(c);
     return out;
@@ -133,6 +193,7 @@ int main(int argc, const char *argv[]) {
             save(scene.background.CGImage, [name stringByAppendingString:@"-2-background.png"]);
             save(scene.plateDepth.CGImage, [name stringByAppendingString:@"-2-plate-depth.png"]);
             save(scene.tall.CGImage, [name stringByAppendingString:@"-2-tall.png"]);
+            save(scene.frontDepth.CGImage, [name stringByAppendingString:@"-2-front-depth.png"]);
             for (NSUInteger i = 0; i < scene.layers.count; i++) {
                 save(scene.layers[i].image.CGImage, [NSString stringWithFormat:@"%@-3-layer%lu.png", name, (unsigned long)i]);
             }
@@ -163,6 +224,9 @@ int main(int argc, const char *argv[]) {
                     CGImageRef fill = fillFrame(scene, tilt, CGSizeMake(402, 874));
                     save(fill, [NSString stringWithFormat:@"%@-5-fill-%d.png", name, i]);
                     if (fill) CGImageRelease(fill);
+                    CGImageRef phone = fillGPU(scene, tilt);
+                    save(phone, [NSString stringWithFormat:@"%@-6-fill-gpu-%d.png", name, i]);
+                    if (phone) CGImageRelease(phone);
                 }
                 NSURL *clip = [NSURL fileURLWithPath:[outDir stringByAppendingPathComponent:[name stringByAppendingString:@"-9-lock.mp4"]]];
                 t = AUNowMs();

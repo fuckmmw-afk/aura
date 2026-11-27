@@ -30,6 +30,16 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, nullable) NSString *styleName;
 @property (nonatomic, copy, nullable) NSString *tune;          // AUTuneSignature(AUTuneScene) it was made with
 @property (nonatomic, readonly) BOOL complete;                // both: nothing to make again once the models are here
+// The solid scene («Сплошная сцена»): no objects lifted out. The cover itself (with the room below it when there is
+// one, `front` is then as tall as `tall`) is ONE surface at its own depth; it tears only where the depth jumps, and
+// what a tear can open is in `background` (the near side of every jump painted out by LaMa) over `plateDepth`.
+@property (nonatomic, strong, nullable) UIImage *front;       // opaque, the size of `tall` (or of `background`)
+@property (nonatomic, strong, nullable) UIImage *frontDepth;  // its depth, edges snapped to one side, near sides grown
+@property (nonatomic) double nearDepth;                       // the surface's near end (95th percentile), for the camera
+@property (nonatomic) double tearJump;                        // a depth step this big (0...1) tears the surface
+@property (nonatomic, readonly) BOOL solid;                   // front and frontDepth are there
+@property (nonatomic, readonly, nullable) NSData *frontBytes; // frontDepth as 8-bit gray, frontSide x frontHigh
+@property (nonatomic, readonly) size_t frontSide, frontHigh;
 // Everything moves by its depth around the background's median c: a point at depth d shifts by tilt x motion x side
 // x factor, factor = (d - c) x 2, so the near goes with the tilt and the far against it. The background bends so per
 // pixel (its depth is smooth, nothing tears; factor kept within -0.6...0.6); every object moves whole at its own

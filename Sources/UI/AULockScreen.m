@@ -37,6 +37,8 @@ typedef struct {
     double reliefs[16];
     int count;
     CGImageRef shade;
+    CGContextRef front;           // the solid scene's surface (premultiplied), the picture's size, faded out at the foot
+    double frontTop;              // where the picture's top is in the frame (rows)
     CGSize size;
     CGRect square;                // the square in the frame, pixels, rows top down (zoomed)
     double side;
@@ -178,6 +180,32 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     extendCover(base, pictureTopDown, side, footFrom, MAX(footFrom + side * 0.15, footTo));
     l.background = CGBitmapContextCreateImage(base);
     l.base = base;
+    l.frontTop = top;
+    if (scene.solid) {
+        // The cover itself as one surface over the painted background; it fades out where the blur at the foot comes
+        // in, so the blurred room (the background's) carries on below it.
+        CGImageRef f = scene.front.CGImage;
+        size_t fw = (size_t)MIN(lround(side), 720L);
+        double frontTall = CGImageGetHeight(f) / (double)MAX((size_t)1, CGImageGetWidth(f));
+        size_t fh = (size_t)lround(fw * frontTall);
+        CGContextRef fc = bgraContext(fw, fh, NULL, 0);
+        if (fc) {
+            CGContextSetInterpolationQuality(fc, kCGInterpolationHigh);
+            CGContextDrawImage(fc, CGRectMake(0, 0, fw, fh), f);
+            uint8_t *fp = CGBitmapContextGetData(fc);
+            size_t frow = CGBitmapContextGetBytesPerRow(fc);
+            double fadeFrom = (footFrom - margin - top) * fw / side, fadeTo = fadeFrom + 0.15 * fw;
+            for (size_t y = 0; y < fh; y++) {
+                double t = MAX(0.0, MIN(1.0, (y - fadeFrom) / (fadeTo - fadeFrom)));
+                t = t * t * (3 - 2 * t);
+                if (t <= 0) continue;
+                uint32_t keep = (uint32_t)lround((1 - t) * 256);
+                uint8_t *r = fp + y * frow;
+                for (size_t i = 0; i < fw * 4; i++) r[i] = (uint8_t)((r[i] * keep) >> 8);
+            }
+            l.front = fc;
+        }
+    }
     for (AUSceneLayer *object in scene.layers) {
         if (l.count >= 16) break;
         CGContextRef c = bgraContext((size_t)side, (size_t)side, NULL, 0);
@@ -208,6 +236,7 @@ static void freeLayers(AUClipLayers *l) {
     if (l->base) CGContextRelease(l->base);
     for (int i = 0; i < l->count; i++) if (l->objects[i]) CGContextRelease(l->objects[i]);
     if (l->shade) CGImageRelease(l->shade);
+    if (l->front) CGContextRelease(l->front);
     memset(l, 0, sizeof(*l));
 }
 
@@ -230,6 +259,11 @@ static void drawFrame(CGContextRef context, AUClipLayers *l, AUScene *scene, dou
                                     YES, l->medians[i], NO, l->boxes[i], l->reliefs[i]};
             AUSceneDraw3D(frame, row, w, h, l->square, scene, camera, object);
         }
+        if (l->front && scene.frontBytes) {
+            AUSceneSplat3D(frame, row, w, h, l->square, camera, CGBitmapContextGetData(l->front), CGBitmapContextGetBytesPerRow(l->front),
+                           CGBitmapContextGetWidth(l->front), CGBitmapContextGetHeight(l->front), scene.frontBytes.bytes,
+                           scene.frontSide, scene.frontHigh, scene.tearJump);
+        }
     } else {
         CGContextSetBlendMode(context, kCGBlendModeCopy);
         CGContextDrawImage(context, CGRectMake(-(double)l->margin, -(double)l->margin, CGImageGetWidth(l->background), CGImageGetHeight(l->background)), l->background);
@@ -238,6 +272,12 @@ static void drawFrame(CGContextRef context, AUClipLayers *l, AUScene *scene, dou
         for (int i = 0; i < l->count; i++) {
             CGImageRef image = CGBitmapContextCreateImage(l->objects[i]);
             CGContextDrawImage(context, picture, image);
+            CGImageRelease(image);
+        }
+        if (l->front) {
+            CGImageRef image = CGBitmapContextCreateImage(l->front);
+            double high = l->side * CGBitmapContextGetHeight(l->front) / (double)CGBitmapContextGetWidth(l->front);
+            CGContextDrawImage(context, CGRectMake(l->square.origin.x, l->size.height - l->frontTop - high, l->side, high), image);
             CGImageRelease(image);
         }
     }
@@ -459,8 +499,8 @@ static AULockMaterial *materialOf(AUArtwork *artwork, BOOL moving) {
     AULockMaterial *material = [AULockMaterial new];
     material.scene = artwork.scene ?: plainScene(artwork.source);
     material.moving = moving;
-    material.signature = [NSString stringWithFormat:@"%@|%d|%lu|%d|%d|v10|%@", artwork.key, material.moving, (unsigned long)material.scene.layers.count,
-                          material.scene.inpainted, artwork.upscaled, AUTuneSignature(AUTuneLock)];
+    material.signature = [NSString stringWithFormat:@"%@|%d|%lu|%d|%d|v11s%d|%@", artwork.key, material.moving, (unsigned long)material.scene.layers.count,
+                          material.scene.inpainted, artwork.upscaled, material.scene.solid, AUTuneSignature(AUTuneLock)];
     return material;
 }
 

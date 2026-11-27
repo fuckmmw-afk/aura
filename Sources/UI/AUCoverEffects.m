@@ -432,6 +432,22 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     return surface.kind == AUSurfaceCover ? scene.square.size : scene.background.size;
 }
 
+// Fill on Metal: the renderer blurs its finished frame; the ramps are the stage's shares of its height (stageHigh),
+// turned into the picture's.
+static void applyBlur(AUSurface *surface, CGFloat stageHigh) {
+    if (!surface.renderer) return;
+    if (surface.kind != AUSurfaceFill || stageHigh < 1) {
+        [surface.renderer clearBlur];
+        return;
+    }
+    CGFloat h = MAX(1, surface.pictureRect.size.height), y = surface.pictureRect.origin.y, H = stageHigh;
+    CGFloat f1, t1, f2, t2;
+    softRamp(0, &f1, &t1);
+    softRamp(1, &f2, &t2);
+    [surface.renderer setBlurRamp1:CGPointMake((f1 * H - y) / h, (t1 * H - y) / h) size1:AUTune(@"blur1Size") / 100
+                             ramp2:CGPointMake((f2 * H - y) / h, (t2 * H - y) / h) size2:AUTune(@"blur2Size") / 100];
+}
+
 - (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {
     double reach = singleLayer() ? kSingleReach : surface.content ? surface.content.plateReach : 0.3;
     if (surface.kind == AUSurfaceFill && (surface.renderer || singleLayer())) {
@@ -470,6 +486,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     if (surface.renderer) {
         surface.renderer.layer.frame = surface.background.bounds;
         [surface.renderer layoutForScale:UIScreen.mainScreen.scale];
+        applyBlur(surface, bounds.size.height);
     }
     [CATransaction commit];
     [self moveSurfaces];
@@ -738,8 +755,10 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     BOOL cover = surface.kind == AUSurfaceCover;
-    UIImage *background = cover ? [scene squareOf:scene.background] : scene.background;
-    surface.background.contents = (__bridge id)(!cover && scene.tall && [AUSceneRenderer supported] ? scene.tall : background).CGImage;
+    // A solid scene's own picture is `front` (its background has the bands behind the tears painted out).
+    UIImage *own = scene.solid ? scene.front : nil;
+    UIImage *background = cover ? [scene squareOf:own ?: scene.background] : own ? [scene squareOf:own] : scene.background;
+    surface.background.contents = (__bridge id)(!cover && scene.tall && [AUSceneRenderer supported] ? own ?: scene.tall : background).CGImage;
     // The whole scene in 3D on Metal — unless the objects are to step out over the cover's frame (CA layers do that).
     BOOL threeD = [AUSceneRenderer supported] && background.CGImage && !(cover && AUFlag(AUKeyPopOut)) && !singleLayer();
     if (threeD) {
@@ -752,13 +771,15 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
         surface.renderer.withObjects = objects;
         surface.renderer.layer.frame = surface.background.bounds;
         [surface.renderer layoutForScale:UIScreen.mainScreen.scale];
+        applyBlur(surface, surface.stage.bounds.size.height);
     } else if (surface.renderer) {
         [surface.renderer.layer removeFromSuperlayer];
         surface.renderer = nil;
     }
     for (NSUInteger k = 0; k < surface.softs.count; k++) {
-        size_t softPixels = softSide((int)k);
-        CGImageRef soft = softPixels ? blurredScene(scene, softPixels, !cover && threeD) : NULL;
+        // On Metal the renderer blurs its own finished frame (setBlurRamp1:…): no still copies to slide apart from it.
+        size_t softPixels = threeD ? 0 : softSide((int)k);
+        CGImageRef soft = softPixels ? blurredScene(scene, softPixels, NO) : NULL;
         surface.softs[k].hidden = !soft;
         surface.softs[k].contents = (__bridge id)soft;
         if (soft) CGImageRelease(soft);
