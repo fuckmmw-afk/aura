@@ -14,7 +14,8 @@
 #import <objc/runtime.h>
 
 static const CGFloat kCoverMinWidth = 200;
-static const CGFloat kStepOut = 1.06;            // the objects' scale over the cover, from its foot (the cover only)
+static const CGFloat kStepOut = 1.06;
+static const CGFloat kSingleReach = 0.6;          // one layer: how far the picture slides at a full tilt (× strength × side)            // the objects' scale over the cover, from its foot (the cover only)
 
 typedef NS_ENUM(NSInteger, AUSurfaceKind) {
     AUSurfaceCover,
@@ -158,6 +159,26 @@ static CALayer *ivarLayer(id object, const char *name) {
 }
 
 // An artwork published for another track than the one playing is not shown.
+// 1: the whole picture moves as one layer (no 3D, no objects), 0: the 3D scene.
+static BOOL singleLayer(void) {
+    return AUInteger(AUKeyMotionMode, 0) == 1;
+}
+
+static char kPlainSceneKey;
+
+// The cover itself as a scene with nothing lifted out, made once per artwork.
+static AUScene *plainSceneOf(AUArtwork *artwork) {
+    if (!artwork.source) return nil;
+    AUScene *scene = objc_getAssociatedObject(artwork, &kPlainSceneKey);
+    if (scene) return scene;
+    scene = [AUScene new];
+    scene.background = artwork.source;
+    scene.square = CGRectMake(0, 0, artwork.source.size.width * artwork.source.scale, artwork.source.size.height * artwork.source.scale);
+    scene.layers = @[];
+    objc_setAssociatedObject(artwork, &kPlainSceneKey, scene, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return scene;
+}
+
 static BOOL forCurrentTrack(AUArtwork *artwork) {
     NSString *playing = AUTaurusTrackURI();
     return !playing.length || !artwork.trackURI.length || [artwork.trackURI isEqualToString:playing];
@@ -412,12 +433,14 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
 }
 
 - (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {
-    double reach = surface.content ? surface.content.plateReach : 0.3;
-    if (surface.kind == AUSurfaceFill && surface.renderer) {
+    double reach = singleLayer() ? kSingleReach : surface.content ? surface.content.plateReach : 0.3;
+    if (surface.kind == AUSurfaceFill && (surface.renderer || singleLayer())) {
         // The cover across the stage's width from its top, the room below it after; zoomed round the cover's middle.
         CGFloat side0 = bounds.size.width * AUTune(@"fillCrop");
-        CGFloat side = side0 * (_shownMoving ? AUSceneZoom(AUNumber(AUKeyDepthStrength, 1.0)) : 1);
-        surface.pictureRect = CGRectMake((bounds.size.width - side) / 2, (side0 - side) / 2, side, side * surface.renderer.frameTall);
+        CGFloat zoom = !_shownMoving ? 1 : surface.renderer ? AUSceneZoom(AUNumber(AUKeyDepthStrength, 1.0)) : 1 + 2 * kSingleReach * strengthNow() + 0.006;
+        CGFloat side = side0 * zoom;
+        CGFloat tall = surface.renderer ? surface.renderer.frameTall : 1;
+        surface.pictureRect = CGRectMake((bounds.size.width - side) / 2, (side0 - side) / 2, side, side * tall);
     } else {
         surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, [self pictureSizeFor:surface], _shownMoving, reach,
                                             surface.renderer != nil);
@@ -614,7 +637,8 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
             if (_active && scene) [surface.renderer render];
         } else {
             // No GPU: the background slides whole, as the rule moves its typical (a little far) depth.
-            CGFloat back = scene ? [scene plateFactorOf:scene.plateCenter - 0.15] * strength * side : 0;
+            CGFloat back = singleLayer() ? kSingleReach * strength * side
+                         : scene ? [scene plateFactorOf:scene.plateCenter - 0.15] * strength * side : 0;
             surface.background.affineTransform = CGAffineTransformMakeTranslation(_tiltNow.x * back, _tiltNow.y * back);
         }
         for (CALayer *soft in surface.softs) soft.affineTransform = surface.background.affineTransform;
@@ -717,7 +741,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     UIImage *background = cover ? [scene squareOf:scene.background] : scene.background;
     surface.background.contents = (__bridge id)(!cover && scene.tall && [AUSceneRenderer supported] ? scene.tall : background).CGImage;
     // The whole scene in 3D on Metal — unless the objects are to step out over the cover's frame (CA layers do that).
-    BOOL threeD = [AUSceneRenderer supported] && background.CGImage && !(cover && AUFlag(AUKeyPopOut));
+    BOOL threeD = [AUSceneRenderer supported] && background.CGImage && !(cover && AUFlag(AUKeyPopOut)) && !singleLayer();
     if (threeD) {
         if (!surface.renderer) {
             surface.renderer = [AUSceneRenderer new];
@@ -767,10 +791,11 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     NSArray<AUSurface *> *surfaces = [self attachedSurfaces];
     if (!surfaces.count) return;
     if (artwork != [AUPipeline shared].current) return;
-    AUScene *scene = artwork.scene;
-    BOOL objects = [self wantsObjects] && scene.layers.count;
+    BOOL single = singleLayer();
+    AUScene *scene = single ? plainSceneOf(artwork) : artwork.scene;
+    BOOL objects = !single && [self wantsObjects] && scene.layers.count;
     // In 3D even a cover with no objects lifted moves: its background has its own relief.
-    BOOL moving = [self wantsMotion] && (objects || [AUSceneRenderer supported]);
+    BOOL moving = [self wantsMotion] && (single || objects || [AUSceneRenderer supported]);
     BOOL wantPlane = scene && ([self wantsObjects] || artwork.upscaled) && forCurrentTrack(artwork);
     BOOL sameCover = [artwork.key isEqualToString:_shownKey];
     if (!sameCover) {

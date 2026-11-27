@@ -162,23 +162,32 @@ void AUYandexFillUpdate(UIView *artworkView, UICollectionView *carousel) {
         objc_setAssociatedObject(artworkView, &kFillKey, fill, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     sFill = fill;
-    // Under the carousel, over the artwork view's own background (its `backgroundContainer`, when it has one).
-    Ivar ivar = class_getInstanceVariable(object_getClass(artworkView), "backgroundContainer");
-    id background = ivar ? object_getIvar(artworkView, ivar) : nil;
-    UIView *host = artworkView;
-    if (fill.superview != host) {
-        if ([background isKindOfClass:UIView.class] && [(UIView *)background superview] == artworkView) {
-            [artworkView insertSubview:fill aboveSubview:background];
-        } else {
-            [artworkView insertSubview:fill atIndex:0];
+    // The fill hangs off the artwork view's lifetime, wherever it is put.
+    // The player's background: in the player's own view, under the list the player scrolls in (the artwork view lies
+    // in a SwiftUI card inside it, which cuts anything drawn from there). Else over the artwork view's background.
+    UIViewController *player = AUYandexPlayerController();
+    UIView *list = AUYandexPlayerLayerOf(artworkView);
+    UIView *root = player.viewIfLoaded;
+    if (root && list) {
+        if (fill.superview != root || [root.subviews indexOfObject:fill] > [root.subviews indexOfObject:list]) {
+            [root insertSubview:fill belowSubview:list];
+            AULog(@"yandex: Fill in the player's view, under %@", NSStringFromClass(list.class));
         }
-        AULog(@"yandex: Fill in %@ (%@), %@", NSStringFromClass(artworkView.class),
-              background ? @"over its backgroundContainer" : @"at the bottom", artworkView.clipsToBounds ? @"clipped" : @"unclipped");
+        if (!CGRectEqualToRect(fill.frame, root.bounds)) fill.frame = root.bounds;
+    } else {
+        Ivar ivar = class_getInstanceVariable(object_getClass(artworkView), "backgroundContainer");
+        id background = ivar ? object_getIvar(artworkView, ivar) : nil;
+        if (fill.superview != artworkView) {
+            if ([background isKindOfClass:UIView.class] && [(UIView *)background superview] == artworkView) {
+                [artworkView insertSubview:fill aboveSubview:background];
+            } else {
+                [artworkView insertSubview:fill atIndex:0];
+            }
+            AULog(@"yandex: Fill in the artwork view (no player view yet)");
+        }
+        CGRect frame = [artworkView convertRect:artworkView.window.bounds fromView:nil];
+        if (!CGRectEqualToRect(fill.frame, frame)) fill.frame = frame;
     }
-    // The whole window, wherever the artwork view lies in it.
-    CGRect window = artworkView.window.bounds;
-    CGRect frame = [artworkView convertRect:window fromView:nil];
-    if (!CGRectEqualToRect(fill.frame, frame)) fill.frame = frame;
     UIImage *image = AUYandexArtwork(NULL, NULL, NULL);
     if (image) [fill setPicture:image];
     // The carousel's covers give way (still there to be swiped).

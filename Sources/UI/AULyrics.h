@@ -12,6 +12,8 @@ NS_ASSUME_NONNULL_BEGIN
 #define AUKeyLyrics @"aura.lyr.on"   // on until switched off
 
 void AULyricsStart(void);
+// The app's network tasks watched for its own lyrics request (sent again from here).
+void AULyricsWatchNetwork(void);
 // The player's view controller laid out (Core/AUYandex).
 void AULyricsPlayerLaidOut(UIViewController *controller);
 // A body some download brought: kept if it is the lyrics of the playing song (LRC).

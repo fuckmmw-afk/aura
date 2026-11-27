@@ -30,6 +30,7 @@ NSURL *AULogURL(void);
 #define AUKeyCutoutObjects @"aura.cutout.objects" // (retired)
 #define AUKeyScenePeopleOnly @"aura.scene.peopleOnly" // off: every subject on the cover gets a layer
 #define AUKeyUpscale @"aura.upscale"
+#define AUKeyMotionMode @"aura.motion"            // 0 the 3D scene, 1 the whole picture as one layer
 
 BOOL AUEnabled(NSString *key);   // unset is on
 BOOL AUFlag(NSString *key);      // unset is off

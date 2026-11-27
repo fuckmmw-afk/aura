@@ -31,6 +31,10 @@ BOOL AUYandexSeek(double seconds);
 // From the MPRemoteCommand hooks, at launch: the app's handlers.
 void AUYandexRemoteHandlerAdded(id command, id _Nullable handler, id _Nullable target, SEL _Nullable action);
 
+// The player's view controller (its view holds the list the player scrolls in), or nil.
+UIViewController *_Nullable AUYandexPlayerController(void);
+// The direct subview of the player's view that holds `view` (the list's container), or nil.
+UIView *_Nullable AUYandexPlayerLayerOf(UIView *view);
 // The player's view controller laid out: Fill, the lyrics and the player's tree for the log.
 void AUYandexPlayerLaidOut(UIViewController *controller);
 

@@ -5,6 +5,7 @@
 #import "AUYandexColors.h"
 #import "AUCore.h"
 #import <objc/runtime.h>
+#import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import "Vendor/fishhook.h"
@@ -107,6 +108,30 @@ static CGColorRef whiteGeneric(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
     return origGeneric(r, g, b, a);
 }
 
+// A yellow CGColor as white with its alpha (+1), or NULL when it is not yellow.
+static CGColorRef whiteFor(CGColorRef color) {
+    if (!color) return NULL;
+    CGColorSpaceRef space = CGColorGetColorSpace(color);
+    if (!space || CGColorSpaceGetModel(space) != kCGColorSpaceModelRGB || CGColorGetNumberOfComponents(color) < 4) return NULL;
+    const CGFloat *c = CGColorGetComponents(color);
+    if (!yellowish(c[0], c[1], c[2])) return NULL;
+    CGFloat white[4] = {1, 1, 1, c[3]};
+    return origCreate ? origCreate(space, white) : CGColorCreate(space, white);
+}
+
+typedef void (*SetColor)(id, SEL, CGColorRef);
+
+static void swapLayerColor(Class cls, SEL sel) {
+    swapOwn(cls, sel, ^id(IMP imp) {
+        SetColor orig = (SetColor)imp;
+        return ^(id self, CGColorRef color) {
+            CGColorRef white = whiteFor(color);
+            orig(self, sel, white ?: color);
+            if (white) CGColorRelease(white);
+        };
+    });
+}
+
 static struct rebinding sColorRebindings[3];
 
 static void addedImage(const struct mach_header *header, intptr_t slide) {
@@ -148,6 +173,12 @@ void AUYandexColorsInstall(void) {
     });
     SEL yellow = @selector(systemYellowColor);
     swapOwn(meta, yellow, ^id(IMP orig) { return ^UIColor *(id self) { return UIColor.whiteColor; }; });
+
+    // What SwiftUI and Core Animation draw with, whoever made the colour: layers' fills, backgrounds and borders.
+    swapLayerColor(CALayer.class, @selector(setBackgroundColor:));
+    swapLayerColor(CALayer.class, @selector(setBorderColor:));
+    swapLayerColor(CAShapeLayer.class, @selector(setFillColor:));
+    swapLayerColor(CAShapeLayer.class, @selector(setStrokeColor:));
 
     origCreate = CGColorCreate;
     origSRGB = CGColorCreateSRGB;

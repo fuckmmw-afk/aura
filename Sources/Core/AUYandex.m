@@ -455,13 +455,39 @@ static void *swiftObjectField(id object, const char *name) {
 
 // TrackLyricsViewModel.isMiniLyricsVisible: the app's lyrics folded into the cover's card.
 static BOOL miniLyricsVisible(void) {
+    static int told;
     UIViewController *player = sPlayer;
     void *model = swiftObjectField(player, "trackLyricsViewModel");
-    if (!model) return NO;
+    if (!model) {
+        if (player && told++ < 2) AULog(@"lyrics: no trackLyricsViewModel in %@", NSStringFromClass(player.class));
+        return NO;
+    }
     id object = (__bridge id)model;
     Ivar flag = class_getInstanceVariable(object_getClass(object), "isMiniLyricsVisible");
-    if (!flag) return NO;
-    return *((uint8_t *)model + ivar_getOffset(flag)) != 0;
+    if (!flag) {
+        if (told++ < 2) AULog(@"lyrics: %@ has no isMiniLyricsVisible", NSStringFromClass(object_getClass(object)));
+        return NO;
+    }
+    BOOL on = *((uint8_t *)model + ivar_getOffset(flag)) != 0;
+    static int last = -1;
+    if (on != last) {
+        last = on;
+        AULog(@"lyrics: the app's folded lyrics %@", on ? @"shown" : @"hidden");
+    }
+    return on;
+}
+
+UIViewController *AUYandexPlayerController(void) {
+    return sPlayer;
+}
+
+UIView *AUYandexPlayerLayerOf(UIView *view) {
+    UIView *root = sPlayer.viewIfLoaded;
+    if (!root) return nil;
+    for (UIView *v = view; v; v = v.superview) {
+        if (v.superview == root) return v;
+    }
+    return nil;
 }
 
 void AUYandexPlayerLaidOut(UIViewController *controller) {

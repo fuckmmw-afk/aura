@@ -181,6 +181,110 @@ void AULyricsSawBody(NSData *data, NSURL *url) {
     });
 }
 
+#pragma mark - the app's own lyrics, from its requests
+
+// Every task the app starts passes through `resume`: the app's lyrics request (/tracks/<id>/lyrics, signed, with its
+// own Authorization) is sent again from here, and the LRC file it points to fetched. Nothing of it is logged but the
+// path's shape (digits as #): the hosts and paths the app uses, for the log.
+static void replayLyrics(NSURLRequest *request, NSURLSession *session, NSString *uri) {
+    NSMutableURLRequest *copy = [request mutableCopy];
+    copy.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    [copy setValue:@"1" forHTTPHeaderField:@"X-Aura-Replay"];   // not taken for the app's own again
+    // The app's own session when it can be had: its configuration may carry the headers (Authorization) itself.
+    [[(session ?: NSURLSession.sharedSession) dataTaskWithRequest:copy completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSInteger code = [response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)response).statusCode : 0;
+        id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        id result = [json isKindOfClass:NSDictionary.class] ? json[@"result"] : nil;
+        NSString *download = [result isKindOfClass:NSDictionary.class] && [result[@"downloadUrl"] isKindOfClass:NSString.class] ? result[@"downloadUrl"] : nil;
+        if (!download.length) {
+            AULog(@"lyrics: the app's lyrics request gave %ld, no file", (long)code);
+            return;
+        }
+        [[NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:download] completionHandler:^(NSData *file, NSURLResponse *r, NSError *e) {
+            NSString *text = file ? [[NSString alloc] initWithData:file encoding:NSUTF8StringEncoding] : nil;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (text.length) keep(uri, text, @"Яндекса");
+                else AULog(@"lyrics: the app's lyrics file did not come (%@)", e.localizedDescription ?: @"empty");
+            });
+        }] resume];
+    }] resume];
+}
+
+static void sawRequest(NSURLRequest *request, NSURLSessionTask *task) {
+    if ([request valueForHTTPHeaderField:@"X-Aura-Replay"]) return;
+    NSURL *url = request.URL;
+    NSString *host = url.host;
+    if (!host || ![host containsString:@"yandex"]) return;
+    NSString *path = url.path ?: @"";
+    static NSMutableSet<NSString *> *shapes;
+    static dispatch_once_t once;
+    static NSRegularExpression *digits, *lyricsPath;
+    dispatch_once(&once, ^{
+        shapes = [NSMutableSet set];
+        digits = [NSRegularExpression regularExpressionWithPattern:@"\\d+" options:0 error:nil];
+        lyricsPath = [NSRegularExpression regularExpressionWithPattern:@"/tracks/[0-9]+(:[0-9]+)?/lyrics$" options:0 error:nil];
+    });
+    NSString *shape = [NSString stringWithFormat:@"%@ %@ %@", request.HTTPMethod ?: @"GET", host,
+                       [digits stringByReplacingMatchesInString:path options:0 range:NSMakeRange(0, path.length) withTemplate:@"#"]];
+    @synchronized (shapes) {
+        if (shapes.count < 80 && ![shapes containsObject:shape]) {
+            [shapes addObject:shape];
+            AULog(@"net: %@", shape);
+        }
+    }
+    if (![lyricsPath firstMatchInString:path options:0 range:NSMakeRange(0, path.length)]) return;
+    NSURLSession *session = nil;
+    @try {
+        id value = [task valueForKey:@"session"];
+        if ([value isKindOfClass:NSURLSession.class]) session = value;
+    } @catch (NSException *e) {
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *uri = AUTaurusTrackURI();
+        if (!uri.length || sLyrics[uri].synced) return;
+        AULog(@"lyrics: the app asks for its lyrics; asking the same");
+        replayLyrics(request, session, uri);
+    });
+}
+
+void AULyricsWatchNetwork(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionTask *probe = [NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:@"https://127.0.0.1/"]];
+        SEL resume = @selector(resume);
+        // The class whose own `resume` runs for the app's tasks.
+        for (Class cls = probe.class; cls; cls = class_getSuperclass(cls)) {
+            unsigned int count = 0;
+            Method *methods = class_copyMethodList(cls, &count);
+            Method own = NULL;
+            for (unsigned int i = 0; i < count; i++) {
+                if (method_getName(methods[i]) == resume) own = methods[i];
+            }
+            free(methods);
+            if (!own) continue;
+            __block void (*orig)(id, SEL) = (void (*)(id, SEL))method_getImplementation(own);
+            method_setImplementation(own, imp_implementationWithBlock(^(NSURLSessionTask *task) {
+                @try {
+                    NSURLRequest *request = task.currentRequest ?: task.originalRequest;
+                    if (request) sawRequest(request, task);
+                } @catch (NSException *e) {
+                }
+                orig(task, resume);
+            }));
+            AULog(@"lyrics: watching the app's requests (%@ resume)", NSStringFromClass(cls));
+            break;
+        }
+        [probe cancel];
+    });
+}
+
+// Yandex marks explicit songs in the title it hands iOS ("pleasure !⃝"): not part of the name.
+static NSString *cleanTitle(NSString *title) {
+    NSString *t = [title stringByReplacingOccurrencesOfString:@"!\u20DD" withString:@""];
+    t = [t stringByReplacingOccurrencesOfString:@"\u20DD" withString:@""];
+    return [t stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+}
+
 static NSString *firstArtist(NSString *artists) {
     for (NSString *separator in @[@", ", @" & ", @" feat. ", @" ft. "]) {
         NSRange r = [artists rangeOfString:separator];
@@ -190,7 +294,7 @@ static NSString *firstArtist(NSString *artists) {
 }
 
 static NSData *fetch(NSURL *url, NSInteger *code) {
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:12];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:20];
     [request setValue:@"Aura lyrics (iOS tweak)" forHTTPHeaderField:@"User-Agent"];
     __block NSData *body = nil;
     __block NSInteger status = 0;
@@ -200,7 +304,7 @@ static NSData *fetch(NSURL *url, NSInteger *code) {
         body = data;
         dispatch_semaphore_signal(done);
     }] resume];
-    dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)));
+    dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(22 * NSEC_PER_SEC)));
     if (code) *code = status;
     return body;
 }
@@ -220,7 +324,7 @@ static void askLRCLIB(NSString *uri) {
     if (!AUEnabled(AUKeyLyricsLRCLIB) || [sAsked containsObject:uri]) return;
     if (!sAsked) sAsked = [NSMutableSet set];
     [sAsked addObject:uri];
-    NSString *title = AUTaurusTrackTitle() ?: @"", *artist = AUYandexTrackArtist() ?: @"", *album = AUYandexTrackAlbum() ?: @"";
+    NSString *title = cleanTitle(AUTaurusTrackTitle() ?: @""), *artist = AUYandexTrackArtist() ?: @"", *album = AUYandexTrackAlbum() ?: @"";
     double duration = AUYandexDuration();
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSString *found = nil;
@@ -839,9 +943,17 @@ static void AULyricsMiniRefresh(void) {
         view.hidden = YES;
         return;
     }
-    if (view.superview != artwork) [artwork addSubview:view];
-    else if (artwork.subviews.lastObject != view) [artwork bringSubviewToFront:view];
-    CGRect frame = [artwork convertRect:cell.bounds fromView:cell];
+    // Over the list the player scrolls in (the app draws its folded lyrics in a SwiftUI card there), under the bars.
+    UIView *list = AUYandexPlayerLayerOf(artwork);
+    UIView *root = list.superview ?: artwork;
+    if (list) {
+        if (view.superview != root || [root.subviews indexOfObject:view] != [root.subviews indexOfObject:list] + 1) {
+            [root insertSubview:view aboveSubview:list];
+        }
+    } else if (view.superview != artwork) {
+        [artwork addSubview:view];
+    }
+    CGRect frame = [root convertRect:cell.bounds fromView:cell];
     if (!CGRectEqualToRect(view.frame, frame)) view.frame = frame;
     UIView *expand = [view.ownBackdrop viewWithTag:77];
     expand.frame = CGRectMake(frame.size.width - 34, 16, 18, 18);

@@ -104,6 +104,9 @@ UIViewController *AUSettingsPage(void) {
     SGModRow *depth = AURowSwitch(@"Живые обложки", @"3D-сцена: объекты обложки целыми слоями над дорисованным фоном, движутся от гироскопа", AUKeyDepth);
     depth.changed = ^(BOOL on) { AUSettingsChanged(); };
     ADD(cover, AURowSymbol(depth, @"cube.transparent"));
+    SGModRow *mode = AURowChoice(@"Метод параллакса", nil, AUKeyMotionMode, @[@"3D-сцена", @"Упрощённый (одним слоем)"], 0);
+    mode.chosen = ^(NSInteger index) { AUSettingsChanged(); };
+    ADD(cover, AURowSymbol(mode, @"square.3.layers.3d"));
     SGModRow *strength = AURowSlider(@"Сила параллакса", nil, 0.3, 3.0, 0.1, ^double { return AUNumber(AUKeyDepthStrength, 1.0); },
                                      ^(double value) { AUSetNumber(AUKeyDepthStrength, value); },
                                      ^NSString *(double value) { return [NSString stringWithFormat:@"×%.1f", value]; });

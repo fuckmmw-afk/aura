@@ -193,6 +193,7 @@ static void startYandex(double started) {
     %init(YandexNowPlaying);
     %init(YandexVideo);
     %init(YandexNet);
+    AULyricsWatchNetwork();
     if (NSClassFromString(@"_TtC23MusicPlayerLandingMaple20PlayerViewController")) %init(YandexPlayerScreen);
     AUYandexStart();
     [AUPipeline.shared start];
