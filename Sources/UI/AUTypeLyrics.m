@@ -14,6 +14,9 @@
 #import "Core/AUTune.h"
 #import <AVFoundation/AVFoundation.h>
 #import <TargetConditionals.h>
+#if !TARGET_OS_MACCATALYST
+#import <MediaPlayer/MediaPlayer.h>
+#endif
 
 extern const unsigned char AUGagalinOTF[];
 extern const size_t AUGagalinOTF_len;
