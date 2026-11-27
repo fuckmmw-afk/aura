@@ -24,10 +24,25 @@ static BOOL yellowish(CGFloat r, CGFloat g, CGFloat b) {
     return hue >= 38 && hue <= 64;
 }
 
+// The first few yellows each way turns white, in the log: which ways the app's yellow really takes.
+static void whiteHit(const char *what) {
+    static NSMutableDictionary<NSString *, NSNumber *> *counts;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ counts = [NSMutableDictionary dictionary]; });
+    NSString *name = @(what);
+    @synchronized (counts) {
+        NSInteger n = counts[name].integerValue;
+        counts[name] = @(n + 1);
+        if (n >= 2) return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{ AULog(@"white: %@ made white", name); });
+}
+
 static UIColor *whiteIfYellow(UIColor *color) {
     CGFloat r, g, b, a;
     if (![color getRed:&r green:&g blue:&b alpha:&a]) return color;
     if (!yellowish(r, g, b)) return color;
+    whiteHit("UIColor (dynamic or named)");
     return [UIColor colorWithWhite:1 alpha:a];
 }
 
@@ -56,7 +71,10 @@ typedef UIColor *(*RGBA)(id, SEL, CGFloat, CGFloat, CGFloat, CGFloat);
 static id rgbaBlock(SEL sel, IMP imp) {
     RGBA orig = (RGBA)imp;
     return ^UIColor *(id self, CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
-        if (yellowish(r, g, b)) r = g = b = 1;
+        if (yellowish(r, g, b)) {
+            whiteHit("UIColor(red:green:blue:)");
+            r = g = b = 1;
+        }
         return orig(self, sel, r, g, b, a);
     };
 }
@@ -92,6 +110,7 @@ static CGColorRef (*origGeneric)(CGFloat, CGFloat, CGFloat, CGFloat);
 static CGColorRef whiteCreate(CGColorSpaceRef space, const CGFloat *components) {
     if (space && components && CGColorSpaceGetModel(space) == kCGColorSpaceModelRGB && CGColorSpaceGetNumberOfComponents(space) == 3
         && yellowish(components[0], components[1], components[2])) {
+        whiteHit("CGColorCreate");
         CGFloat white[4] = {1, 1, 1, components[3]};
         return origCreate(space, white);
     }
@@ -99,7 +118,10 @@ static CGColorRef whiteCreate(CGColorSpaceRef space, const CGFloat *components) 
 }
 
 static CGColorRef whiteSRGB(CGFloat r, CGFloat g, CGFloat b, CGFloat a) {
-    if (yellowish(r, g, b)) r = g = b = 1;
+    if (yellowish(r, g, b)) {
+        whiteHit("CGColorCreateSRGB");
+        r = g = b = 1;
+    }
     return origSRGB(r, g, b, a);
 }
 
@@ -126,6 +148,7 @@ static void swapLayerColor(Class cls, SEL sel) {
         SetColor orig = (SetColor)imp;
         return ^(id self, CGColorRef color) {
             CGColorRef white = whiteFor(color);
+            if (white) whiteHit(sel_getName(sel));
             orig(self, sel, white ?: color);
             if (white) CGColorRelease(white);
         };
