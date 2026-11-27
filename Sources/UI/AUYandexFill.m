@@ -41,6 +41,8 @@ static CGImageRef blurredCopy(UIImage *image) {
 @implementation AUYandexFillView {
     CAGradientLayer *_fade;
     __weak UIImage *_shown;
+    CGSize _composedFor;
+    CGFloat _sideFor;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -50,7 +52,7 @@ static CGImageRef blurredCopy(UIImage *image) {
     _fill = [CALayer layer];
     _fill.actions = noActions();
     _fill.masksToBounds = YES;
-    _fill.contentsGravity = kCAGravityResizeAspectFill;
+    _fill.contentsGravity = kCAGravityResize;
     _fade = [CAGradientLayer layer];
     _fade.actions = noActions();
     _fill.mask = _fade;
@@ -69,10 +71,46 @@ static CGImageRef blurredCopy(UIImage *image) {
     if (image) [self setPicture:image];
 }
 
-// The still picture as the fill's own contents (under every sublayer, as Taurus's is, so Aura's scene goes over it):
-// the cover stretched over the field.
+// The still picture as the fill's own contents (under every sublayer, so Aura's scene goes over it), Spotify's
+// Fill: the cover across the width at the top; below it, until the scene (with the room LaMa paints under the cover)
+// comes, a blurred copy that the cover's foot melts into, with no edge between them.
 - (void)compose {
-    _fill.contents = (__bridge id)_shown.CGImage;
+    UIImage *image = _shown;
+    CGSize size = _fill.bounds.size;
+    if (!image.CGImage || size.width < 1 || size.height < 1) return;
+    _composedFor = size;
+    CGFloat side = size.width * AUTune(@"fillCrop");
+    _sideFor = side;
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.opaque = YES;
+    format.scale = MIN(2, UIScreen.mainScreen.scale);
+    CGImageRef soft = blurredCopy(image);
+    UIImage *made = [[[UIGraphicsImageRenderer alloc] initWithSize:size format:format] imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        CGContextRef c = context.CGContext;
+        if (soft) {
+            CGFloat s = MAX(size.width, size.height);
+            CGContextSaveGState(c);
+            CGContextTranslateCTM(c, 0, size.height);
+            CGContextScaleCTM(c, 1, -1);
+            CGContextDrawImage(c, CGRectMake((size.width - s) / 2, (size.height - s) / 2, s, s), soft);
+            CGContextRestoreGState(c);
+        }
+        // The cover, its lowest quarter fading into the blur.
+        CGRect cover = CGRectMake((size.width - side) / 2, 0, side, side);
+        CGContextSaveGState(c);
+        CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
+        CGGradientRef ramp = CGGradientCreateWithColorComponents(gray, (CGFloat[]){1, 1, 1, 1, 1, 0}, (CGFloat[]){0, 0.72, 1}, 3);
+        CGColorSpaceRelease(gray);
+        CGContextBeginTransparencyLayerWithRect(c, cover, NULL);
+        [image drawInRect:cover];
+        CGContextSetBlendMode(c, kCGBlendModeDestinationIn);
+        CGContextDrawLinearGradient(c, ramp, CGPointMake(0, CGRectGetMinY(cover)), CGPointMake(0, CGRectGetMaxY(cover)), 0);
+        CGContextEndTransparencyLayer(c);
+        CGContextRestoreGState(c);
+        CGGradientRelease(ramp);
+    }];
+    if (soft) CGImageRelease(soft);
+    _fill.contents = (__bridge id)made.CGImage;
 }
 
 - (void)setPicture:(UIImage *)image {
@@ -84,9 +122,10 @@ static CGImageRef blurredCopy(UIImage *image) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGSize size = self.bounds.size;
-    // Taurus's field: the top of the screen (0.62 by default), the picture faded out at its foot.
-    CGFloat high = round(size.height * AUNumber(AUKeyYandexFillHeight, 0.62));
-    _fill.frame = CGRectMake(0, 0, size.width, high);
+    // The whole screen's height, as Spotify's Fill stage: the cover at the top, what is painted below it after.
+    _fill.frame = CGRectMake(0, 0, size.width, size.height);
+    CGFloat side = size.width * AUTune(@"fillCrop");
+    if (!CGSizeEqualToSize(_composedFor, _fill.bounds.size) || side != _sideFor) [self compose];
     // The still picture's own fade (Aura's scene brings its own when it shows).
     CGFloat from = AUTune(@"fadeFrom"), to = MAX(from + 0.01, AUTune(@"fadeTo"));
     _fade.frame = _fill.bounds;

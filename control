@@ -1,6 +1,6 @@
 Package: app.aura.taurus-addon
 Name: Aura
-Version: 1.5.2
+Version: 1.5.3
 Architecture: iphoneos-arm
 Description: On-device AI effects for the Taurus redesigned Spotify player: living covers, the artist stepping out of the cover, a theme from the cover, upscaled small covers.
 Maintainer: fuckmmw

@@ -535,7 +535,9 @@ static BOOL miniLyricsVisible(void) {
         AULog(@"lyrics: no trackLyricsViewModel in %@", NSStringFromClass(player.class));
     }
     BOOL gone = artworkGone();
-    BOOL on = flag || gone;
+    // The flag alone: the card's cover is also away at other times (Fill, a track change), and the folded lyrics
+    // would stay up after the app put its own away.
+    BOOL on = flag;
     static NSString *last;
     NSString *now = [NSString stringWithFormat:@"%d%d %@", flag, gone, state];
     static int lines;

@@ -434,14 +434,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
 
 - (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {
     double reach = singleLayer() ? kSingleReach : surface.content ? surface.content.plateReach : 0.3;
-    if (surface.kind == AUSurfaceFill && AUHostYandex()) {
-        // The cover stretched over the whole field (aspect fill, its sides cut), as Taurus fills its field; what the
-        // scene painted below the cover runs on under it.
-        CGSize square = surface.content ? surface.content.square.size : CGSizeZero;
-        CGRect rect = pictureRectIn((CGRect){CGPointZero, bounds.size}, square, _shownMoving, reach, surface.renderer != nil);
-        if (surface.renderer) rect.size.height = rect.size.width * surface.renderer.frameTall;
-        surface.pictureRect = rect;
-    } else if (surface.kind == AUSurfaceFill && (surface.renderer || singleLayer())) {
+    if (surface.kind == AUSurfaceFill && (surface.renderer || singleLayer())) {
         // The cover across the stage's width from its top, the room below it after; zoomed round the cover's middle.
         CGFloat side0 = bounds.size.width * AUTune(@"fillCrop");
         CGFloat zoom = !_shownMoving ? 1 : surface.renderer ? AUSceneZoom(AUNumber(AUKeyDepthStrength, 1.0)) : 1 + 2 * kSingleReach * strengthNow() + 0.006;
@@ -608,8 +601,7 @@ static CGRect pictureRectIn(CGRect bounds, CGSize picture, BOOL moving, double r
     CALayer *fill = _fillLayer;
     UIView *field = _field;
     CGFloat window = field.window.bounds.size.height ?: UIScreen.mainScreen.bounds.size.height;
-    // Yandex: Taurus's own look — the stage is the field, the picture stretched over it (Aura's field is its own).
-    CGFloat high = _fillSurface.renderer && !AUHostYandex() ? MAX(fill.bounds.size.height, window) : fill.bounds.size.height;
+    CGFloat high = _fillSurface.renderer ? MAX(fill.bounds.size.height, window) : fill.bounds.size.height;
     return CGRectMake(0, 0, fill.bounds.size.width, high);
 }
 
