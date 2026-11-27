@@ -12,14 +12,14 @@ static NSString *const kShader = @"\
 using namespace metal;\n\
 struct Cam { float2 angles; float2 range; float2 rangeY; float pivot; float scale; float focal; float relief; float median;\n\
              float kind; float zFar; float zNear; float zoom; float reliefBack; float reliefFront; float texTall; float plateTall;\n\
-             float frameTall; };\n\
+             float frameTall; float texTop; float plateTop; float frameTop; };\n\
 struct VOut { float4 position [[position]]; float2 uv; };\n\
 vertex VOut au_mesh(uint vid [[vertex_id]], const device float2 *grid [[buffer(1)]], constant Cam &c [[buffer(0)]],\n\
                     texture2d<float> depth [[texture(0)]]) {\n\
     constexpr sampler sd(address::mirrored_repeat, filter::linear);\n\
     float2 g = grid[vid];\n\
     float2 uv = float2(mix(c.range.x, c.range.y, g.x), mix(c.rangeY.x, c.rangeY.y, g.y));\n\
-    float d = depth.sample(sd, c.kind < 0.5 ? float2(uv.x, uv.y / c.plateTall) : uv, level(0)).r;\n\
+    float d = depth.sample(sd, c.kind < 0.5 ? float2(uv.x, (uv.y + c.plateTop) / c.plateTall) : uv, level(0)).r;\n\
     float z = c.kind < 0.5 ? (d - c.pivot) * c.scale\n\
         : (c.median - c.pivot) * c.scale + clamp(d - c.median, -c.reliefBack, c.reliefFront) * c.relief * c.scale;\n\
     z = clamp(z, -c.zFar, c.zNear);\n\
@@ -31,8 +31,8 @@ vertex VOut au_mesh(uint vid [[vertex_id]], const device float2 *grid [[buffer(1
     float y2 = y * cb + z1 * sb, z2 = -y * sb + z1 * cb;\n\
     float w = c.focal / (c.focal - z2);\n\
     VOut o;\n\
-    o.position = float4(x1 * w * 2 * c.zoom, 1 - 2 * (y2 * w * c.zoom + 0.5) / c.frameTall, 0.5, 1);\n\
-    o.uv = c.kind < 0.5 ? float2(uv.x, uv.y / c.texTall) : uv;\n\
+    o.position = float4(x1 * w * 2 * c.zoom, 1 - 2 * (y2 * w * c.zoom + 0.5 + c.frameTop) / c.frameTall, 0.5, 1);\n\
+    o.uv = c.kind < 0.5 ? float2(uv.x, (uv.y + c.texTop) / c.texTall) : uv;\n\
     return o;\n\
 }\n\
 fragment half4 au_back(VOut in [[stage_in]], texture2d<half> color [[texture(0)]]) {\n\
@@ -44,7 +44,7 @@ fragment half4 au_object(VOut in [[stage_in]], texture2d<half> color [[texture(0
     return color.sample(s, in.uv);\n\
 }\n\
 struct Sheet { float2 angles; float pivot; float scale; float focal; float zFar; float zNear; float zoom; float texTall;\n\
-               float frameTall; float tear; float span; };\n\
+               float frameTall; float tear; float span; float texTop; float frameTop; };\n\
 struct SOut { float4 position [[position]]; float2 uv; float nearCut [[flat]]; };\n\
 // The solid surface: a triangle whose corners sit on both sides of a depth jump is laid wholly at the near side\'s\n\
 // depth, and its fragments of the far side are thrown away: the near edge stays sharp, a gap opens behind it.\n\
@@ -52,12 +52,15 @@ vertex SOut au_sheet(uint vid [[vertex_id]], const device float2 *grid [[buffer(
                      texture2d<float> depth [[texture(0)]]) {\n\
     constexpr sampler sn(address::clamp_to_edge, filter::nearest);\n\
     uint first = vid - vid % 3;\n\
-    float2 g = grid[vid] * float2(1, c.span);\n\
-    float d0 = depth.sample(sn, grid[first] * float2(1, c.span / c.texTall), level(0)).r;\n\
-    float d1 = depth.sample(sn, grid[first + 1] * float2(1, c.span / c.texTall), level(0)).r;\n\
-    float d2 = depth.sample(sn, grid[first + 2] * float2(1, c.span / c.texTall), level(0)).r;\n\
+    // Picture units: the cover\'s top-left is (0, 0); the drawn span starts frameTop above it, the texture texTop.\n\
+    float2 g = grid[vid] * float2(1, c.span) - float2(0, c.frameTop);\n\
+    float2 tex = float2(1, 1 / c.texTall);\n\
+    float2 shift = float2(0, c.texTop - c.frameTop);\n\
+    float d0 = depth.sample(sn, (grid[first] * float2(1, c.span) + shift) * tex, level(0)).r;\n\
+    float d1 = depth.sample(sn, (grid[first + 1] * float2(1, c.span) + shift) * tex, level(0)).r;\n\
+    float d2 = depth.sample(sn, (grid[first + 2] * float2(1, c.span) + shift) * tex, level(0)).r;\n\
     float hi = max(d0, max(d1, d2)), lo = min(d0, min(d1, d2));\n\
-    float d = depth.sample(sn, float2(g.x, g.y / c.texTall), level(0)).r;\n\
+    float d = depth.sample(sn, float2(g.x, g.y + c.texTop) * tex, level(0)).r;\n\
     bool torn = hi - lo > c.tear;\n\
     if (torn) d = hi;\n\
     float z = clamp((d - c.pivot) * c.scale, -c.zFar, c.zNear);\n\
@@ -69,8 +72,8 @@ vertex SOut au_sheet(uint vid [[vertex_id]], const device float2 *grid [[buffer(
     float y2 = y * cb + z1 * sb, z2 = -y * sb + z1 * cb;\n\
     float w = c.focal / (c.focal - z2);\n\
     SOut o;\n\
-    o.position = float4(x1 * w * 2 * c.zoom, 1 - 2 * (y2 * w * c.zoom + 0.5) / c.frameTall, clamp(0.5 - z2 * 0.25, 0.01, 0.99), 1);\n\
-    o.uv = float2(g.x, g.y / c.texTall);\n\
+    o.position = float4(x1 * w * 2 * c.zoom, 1 - 2 * (y2 * w * c.zoom + 0.5 + c.frameTop) / c.frameTall, clamp(0.5 - z2 * 0.25, 0.01, 0.99), 1);\n\
+    o.uv = float2(g.x, g.y + c.texTop) * tex;\n\
     o.nearCut = torn ? hi - c.tear * 0.5 : -1;\n\
     return o;\n\
 }\n\
@@ -110,11 +113,13 @@ fragment half4 au_blur(BOut in [[stage_in]], texture2d<half> scene [[texture(0)]
 typedef struct {
     float angles[2], range[2], rangeY[2];
     float pivot, scale, focal, relief, median, kind, zFar, zNear, zoom, reliefBack, reliefFront, texTall, plateTall, frameTall;
+    float texTop, plateTop, frameTop;
+    float pad;                  // the shader's struct is 8-aligned: 96 bytes
 } AUCam;
 
 typedef struct {
     float angles[2];
-    float pivot, scale, focal, zFar, zNear, zoom, texTall, frameTall, tear, span;
+    float pivot, scale, focal, zFar, zNear, zoom, texTall, frameTall, tear, span, texTop, frameTop;
 } AUSheet;
 
 typedef struct {
@@ -134,6 +139,7 @@ enum { kGrid = 96 };
     NSArray<NSNumber *> *_medians, *_reliefs;
     AUScene *_scene;
     double _texTall;
+    double _texTop, _frameTop;  // the room above the cover in the background texture and in the drawn frame
     id<MTLTexture> _front, _frontDepth;
     double _frontTall;          // the front picture's height over its width
     double _sheetSpan;          // how much of it is drawn: 1 (the cover) or all of it (Fill)
@@ -336,6 +342,7 @@ static id<MTLTexture> grayRectTexture(NSData *bytes, size_t width, size_t height
     _scene = scene;
     UIImage *picture = tall && scene.tall ? scene.tall : scene.background;
     _texTall = tall && scene.tall ? scene.tallness : 1;
+    _texTop = _frameTop = tall && scene.tall ? scene.tallTop : 0;
     _background = colorTexture(picture.CGImage, NO);
     uint8_t flat = (uint8_t)lround(MAX(0.0, MIN(1.0, scene.backgroundDepth)) * 255);
     NSData *flatBytes = [NSData dataWithBytes:(uint8_t[4]){flat, flat, flat, flat} length:4];
@@ -435,9 +442,12 @@ static id<MTLTexture> grayRectTexture(NSData *bytes, size_t width, size_t height
     pass.depthAttachment.storeAction = MTLStoreActionDontCare;
     AUCamera camera = AUSceneCamera(_scene, _tilt, _strength);
     float texTall = (float)_texTall, plateTall = (float)MAX(1.0, _scene.plateHigh / (double)MAX((size_t)1, _scene.plateSide));
-    AUCam cam = {{(float)camera.angleX, (float)camera.angleY}, {-0.12f, 1.12f}, {-0.12f, texTall + 0.12f}, (float)camera.pivot,
-                 (float)camera.scale, (float)camera.focal, (float)camera.relief, 0, 0, (float)camera.zFar, (float)camera.zNear, zoom,
-                 (float)camera.reliefBack, (float)camera.reliefFront, texTall, plateTall, texTall};
+    // Picture units from the cover's top: the drawn frame runs from -frameTop to texTall - frameTop.
+    float frameTop = (float)_frameTop, plateTop = (float)_scene.tallTop;
+    AUCam cam = {{(float)camera.angleX, (float)camera.angleY}, {-0.12f, 1.12f}, {-frameTop - 0.12f, texTall - frameTop + 0.12f},
+                 (float)camera.pivot, (float)camera.scale, (float)camera.focal, (float)camera.relief, 0, 0, (float)camera.zFar,
+                 (float)camera.zNear, zoom, (float)camera.reliefBack, (float)camera.reliefFront, texTall, plateTall, texTall,
+                 (float)_texTop, plateTop, frameTop, 0};
     id<MTLRenderCommandEncoder> encoder = [buffer renderCommandEncoderWithDescriptor:pass];
     [encoder setDepthStencilState:[AUSceneRenderer depthState:NO]];
     [encoder setVertexBuffer:_grid offset:0 atIndex:1];
@@ -465,7 +475,7 @@ static id<MTLTexture> grayRectTexture(NSData *bytes, size_t width, size_t height
         [self buildSheetColumns:(NSUInteger)lround(AUTune(@"surfaceGrid")) span:_sheetSpan];
         AUSheet sheet = {{(float)camera.angleX, (float)camera.angleY}, (float)camera.pivot, (float)camera.scale, (float)camera.focal,
                          (float)camera.zFar, (float)camera.zNear, zoom, (float)_frontTall, (float)_texTall,
-                         (float)_scene.tearJump, (float)_sheetSpan};
+                         (float)_scene.tearJump, (float)_sheetSpan, (float)_scene.tallTop, (float)_frameTop};
         [encoder setRenderPipelineState:pipelines[2]];
         [encoder setDepthStencilState:[AUSceneRenderer depthState:YES]];
         [encoder setVertexBuffer:_sheet offset:0 atIndex:1];
@@ -480,6 +490,10 @@ static id<MTLTexture> grayRectTexture(NSData *bytes, size_t width, size_t height
 
 - (double)frameTall {
     return _texTall;
+}
+
+- (double)frameTop {
+    return _frameTop;
 }
 
 - (BOOL)ready {

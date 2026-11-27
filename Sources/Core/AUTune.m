@@ -58,6 +58,7 @@ NSArray<AUTuneSection *> *AUTuneSections(void) {
                 item(@"invertY", @"Инвертировать по вертикали", nil, 0, 0, 1, 1, AUTuneSwitch, AUTuneLive),
             ]),
             section(@"Плеер (Fill)", @"Сразу. Доли — от высоты экрана.", @[
+                item(@"fillCenter", @"Положение обложки", @"Где середина обложки по высоте экрана: 26% — у верха, как было, 50% — по центру", 0.40, 0.2, 0.6, 0.01, AUTunePercent, AUTuneLive),
                 item(@"fillCrop", @"Размер обложки", @"Ширина обложки относительно экрана (больше — крупнее и обрезаны бока)", 1.12, 1, 2, 0.01, AUTuneTimes, AUTuneLive),
                 item(@"blur1From", @"Лёгкий блюр: начало", nil, 0.56, 0.2, 1.2, 0.01, AUTunePercent, AUTuneLive),
                 item(@"blur1To", @"Лёгкий блюр: полностью", nil, 0.70, 0.2, 1.2, 0.01, AUTunePercent, AUTuneLive),
@@ -69,6 +70,7 @@ NSArray<AUTuneSection *> *AUTuneSections(void) {
                 item(@"fadeTo", @"Затухание: конец", nil, 0.94, 0.2, 1.3, 0.01, AUTunePercent, AUTuneLive),
             ]),
             section(@"Экран блокировки", @"Клип собирается заново (несколько секунд).", @[
+                item(@"lockCenter", @"Положение обложки", @"Где середина обложки по высоте клипа", 0.42, 0.3, 0.6, 0.01, AUTunePercent, AUTuneLock),
                 item(@"lockBoost", @"Размах облёта", @"Относительно плеера", 1.5, 0.2, 4, 0.1, AUTuneTimes, AUTuneLock),
                 item(@"orbitX", @"Орбита по горизонтали", nil, 1.0, 0, 1.5, 0.05, AUTunePlain, AUTuneLock),
                 item(@"orbitY", @"Орбита по вертикали", nil, 0.7, 0, 1.5, 0.05, AUTunePlain, AUTuneLock),
@@ -86,6 +88,7 @@ NSArray<AUTuneSection *> *AUTuneSections(void) {
                 item(@"tear", @"Порог разрыва", @"Скачок глубины, на котором поверхность рвётся: меньше — больше разрывов, больше — больше растяжений", 0.07, 0.02, 0.3, 0.005, AUTunePlain, AUTuneScene),
                 item(@"tearGrow", @"Захват края", @"Насколько ближний край забирает соседние пиксели, чтобы его контур уезжал вместе с ним (% стороны)", 0.65, 0, 3, 0.05, AUTunePlain, AUTuneScene),
                 item(@"tearBand", @"Ширина дорисовки", @"Самая широкая щель, которая может открыться за разрывом (% стороны)", 5.6, 1, 15, 0.1, AUTunePlain, AUTuneScene),
+                item(@"extensionTop", @"Дорисовка вверх", @"Сколько картинки LaMa дорисовывает над обложкой (доля стороны); 0 — не дорисовывать", 0.4, 0, 0.6, 0.01, AUTunePercent, AUTuneScene),
                 item(@"floorRise", @"Наклон пола", @"Насколько дорисованный низ подходит ближе к экрану", 0.15, 0, 0.5, 0.01, AUTunePlain, AUTuneScene),
                 item(@"surfaceGrid", @"Плотность сетки", @"Точек поверхности по ширине: больше — точнее края, тяжелее", 256, 96, 384, 16, AUTuneCount, AUTuneLive),
             ]),

@@ -756,6 +756,33 @@ static CGImageRef outpaintBelow(MLModel *model, CGImageRef background, size_t si
     return out;
 }
 
+// The room above the cover, the same way: the model sees the cover's upper part and a band over it.
+static CGImageRef outpaintAbove(MLModel *model, CGImageRef background, size_t side, double extra, NSString **error) {
+    MLImageConstraint *imageC = model.modelDescription.inputDescriptionsByName[@"image"].imageConstraint;
+    double W = imageC.pixelsWide, H = imageC.pixelsHigh;
+    if (!W || !H) return NULL;
+    double drawn = W;
+    double band = MIN(H * 0.5, drawn * extra);
+    // Top-down: the band from the frame's top, the cover after it (its lower part beyond the frame).
+    CGRect squareIn = CGRectMake(0, band, drawn, drawn);
+    uint8_t *none = calloc(side * side, 1);
+    CGImageRef filled = lamaFill(model, background, none, side, side, squareIn, error);
+    free(none);
+    if (!filled) return NULL;
+    size_t bandHigh = (size_t)lround(side * extra);
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef c = CGBitmapContextCreate(NULL, side, bandHigh, 8, 0, space, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    CGContextSetInterpolationQuality(c, kCGInterpolationHigh);
+    double scale = side / drawn;
+    // The model's frame at the cover's scale, its top rows landing on this context (which counts from the bottom).
+    CGContextDrawImage(c, CGRectMake(0, bandHigh - H * scale, W * scale, H * scale), filled);
+    CGImageRelease(filled);
+    CGImageRef out = CGBitmapContextCreateImage(c);
+    CGContextRelease(c);
+    return out;
+}
+
 // An object that is really two things at clearly different depths (two people one behind the other, a person and the
 // bath before them — Vision often gives such a group as one): its depth inside the mask has two humps with a valley
 // between. Split at the valley (Otsu), softly over a few hundredths of depth, so each part moves by its own depth;
@@ -950,29 +977,38 @@ static void solidDepths(const uint8_t *in, size_t side, NSMutableData *front, NS
     free(mn); free(mx); free(t); free(edges); free(behind);
 }
 
-// The depth carried down the room painted below the cover: each column's last rows, coming a little nearer (a floor).
-static NSData *depthGoingDown(const uint8_t *square, size_t side, size_t high) {
+// The depth carried into the rooms painted around the cover (`above` rows over it, the rest below): each column's
+// first rows going up (a ceiling, as it is) and its last rows going down, coming a little nearer (a floor).
+static NSData *depthAround(const uint8_t *square, size_t side, size_t above, size_t high) {
     NSMutableData *out = [NSMutableData dataWithLength:side * high];
     uint8_t *o = out.mutableBytes;
-    memcpy(o, square, side * side);
-    if (high <= side) return out;
+    if (high < side + above) above = 0;
+    memcpy(o + above * side, square, side * side);
+    size_t belowRows = high - side - above;
     double rise = AUTune(@"floorRise") * 255;
     size_t rows = MIN((size_t)8, side);
     for (size_t x = 0; x < side; x++) {
-        double last = 0;
+        double first = 0, last = 0;
+        for (size_t y = 0; y < rows; y++) first += square[y * side + x];
         for (size_t y = side - rows; y < side; y++) last += square[y * side + x];
+        first /= rows;
         last /= rows;
-        for (size_t y = side; y < high; y++) {
-            double v = last + rise * (y - side) / (double)(high - side);
-            o[y * side + x] = (uint8_t)MAX(0.0, MIN(255.0, v));
+        for (size_t y = 0; y < above; y++) o[y * side + x] = (uint8_t)lround(first);
+        for (size_t y = 0; y < belowRows; y++) {
+            double v = last + rise * y / (double)belowRows;
+            o[(above + side + y) * side + x] = (uint8_t)MAX(0.0, MIN(255.0, v));
         }
     }
     // Softened across: each carried column is its own otherwise.
-    NSMutableData *tmp = [NSMutableData dataWithLength:side * (high - side)];
-    vImage_Buffer A = {o + side * side, high - side, side, side}, B = {tmp.mutableBytes, high - side, side, side};
-    uint32_t k = (uint32_t)(side * 0.03) | 1;
-    vImageTentConvolve_Planar8(&A, &B, NULL, 0, 0, k, k, 0, kvImageEdgeExtend);
-    memcpy(o + side * side, tmp.bytes, side * (high - side));
+    for (int part = 0; part < 2; part++) {
+        size_t from = part ? above + side : 0, count = part ? belowRows : above;
+        if (count < 2) continue;
+        NSMutableData *tmp = [NSMutableData dataWithLength:side * count];
+        vImage_Buffer A = {o + from * side, count, side, side}, B = {tmp.mutableBytes, count, side, side};
+        uint32_t k = (uint32_t)(side * 0.03) | 1;
+        vImageTentConvolve_Planar8(&A, &B, NULL, 0, 0, k, k, 0, kvImageEdgeExtend);
+        memcpy(o + from * side, tmp.bytes, side * count);
+    }
     return out;
 }
 
@@ -1060,16 +1096,8 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         for (size_t i = 0; i < n; i++) area += m[i] >= 128;
         largest = MAX(largest, area / (double)n);
     }
-    if (solid) {
-        // Nothing is cut out; a close-up is a near part of the depth that fills much of the cover.
-        NSData *split = depthSplit(depthMap.bytes, side, side);
-        if (split) {
-            const uint8_t *m = split.bytes;
-            size_t area = 0;
-            for (size_t i = 0; i < n; i++) area += m[i] >= 128;
-            largest = area / (double)n;
-        }
-    }
+    // (The solid scene has no objects: no «close-up» either — the near half of a depth map is mostly a floor, and
+    // the close-up's small swing was only there to spare a cut-out face from stretching, which a tear no longer does.)
     double styleSwing = 1, styleDeep = 1, styleRelief = 1;
     NSString *styleName = @"обычная";
     BOOL flat = spread < 0.28;
@@ -1248,20 +1276,26 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
         }
         if (full) CGImageRelease(full);
         // The room below the cover (Fill, the lock screen), painted by LaMa; the depth carried down its rows.
-        double extension = AUTune(@"extension");
+        // The room below the cover and above it (Fill, the lock screen), painted by LaMa; the depth carried on.
+        double extension = AUTune(@"extension"), extensionTop = AUTune(@"extensionTop");
         CGImageRef below = lama && inpainted && extension > 0.01 ? outpaintBelow(lama, background, side, extension, NULL) : NULL;
-        size_t tallHigh = side + (below ? CGImageGetHeight(below) : 0);
+        CGImageRef above = below && extensionTop > 0.01 ? outpaintAbove(lama, background, side, extensionTop, NULL) : NULL;
+        size_t aboveHigh = above ? CGImageGetHeight(above) : 0;
+        size_t tallHigh = side + aboveHigh + (below ? CGImageGetHeight(below) : 0);
         if (below) {
             CGColorSpaceRef rgbSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
             CGContextRef tc = CGBitmapContextCreate(NULL, side, tallHigh, 8, 0, rgbSpace, kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
             CGColorSpaceRelease(rgbSpace);
             CGContextSetInterpolationQuality(tc, kCGInterpolationHigh);
-            CGContextDrawImage(tc, CGRectMake(0, tallHigh - side, side, side), background);
+            // Core Graphics counts from the bottom: below, then the cover, then above.
+            CGRect coverRect = CGRectMake(0, tallHigh - aboveHigh - side, side, side);
+            CGContextDrawImage(tc, coverRect, background);
             CGContextDrawImage(tc, CGRectMake(0, 0, side, CGImageGetHeight(below)), below);
+            if (above) CGContextDrawImage(tc, CGRectMake(0, tallHigh - aboveHigh, side, aboveHigh), above);
             CGImageRef tall = CGBitmapContextCreateImage(tc);
             if (solid && tall) {
-                // The surface: the cover itself over the same room below.
-                CGContextDrawImage(tc, CGRectMake(0, tallHigh - side, side, side), square);
+                // The surface: the cover itself between the same rooms.
+                CGContextDrawImage(tc, coverRect, square);
                 CGImageRef front = CGBitmapContextCreateImage(tc);
                 if (front) {
                     scene.front = [UIImage imageWithCGImage:front];
@@ -1270,18 +1304,25 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
             }
             CGContextRelease(tc);
             CGImageRelease(below);
+            if (above) CGImageRelease(above);
             if (tall) {
                 scene.tall = [UIImage imageWithCGImage:tall];
                 scene.tallness = tallHigh / (double)side;
+                scene.tallTop = aboveHigh / (double)side;
                 CGImageRelease(tall);
             }
+        } else if (above) {
+            CGImageRelease(above);
         }
-        if (!scene.tall) tallHigh = side;
+        if (!scene.tall) {
+            tallHigh = side;
+            aboveHigh = 0;
+        }
         if (solid) {
             if (!scene.front) scene.front = [UIImage imageWithCGImage:square];
-            size_t wsHigh = (size_t)lround(ws * tallHigh / (double)side);
-            NSData *frontTall = depthGoingDown(solidFront.bytes, ws, wsHigh);
-            NSData *backTall = depthGoingDown(solidBack.bytes, ws, wsHigh);
+            size_t wsHigh = (size_t)lround(ws * tallHigh / (double)side), wsAbove = (size_t)lround(ws * aboveHigh / (double)side);
+            NSData *frontTall = depthAround(solidFront.bytes, ws, wsAbove, wsHigh);
+            NSData *backTall = depthAround(solidBack.bytes, ws, wsAbove, wsHigh);
             CGImageRef fd = AUGrayImage(frontTall.bytes, ws, wsHigh), bd = AUGrayImage(backTall.bytes, ws, wsHigh);
             if (fd) scene.frontDepth = [UIImage imageWithCGImage:fd];
             if (bd) scene.plateDepth = [UIImage imageWithCGImage:bd];
@@ -1290,10 +1331,9 @@ AUScene *AUSceneBuild(CGImageRef cover, CGImageRef depth, BOOL peopleOnly, NSStr
             scene.nearDepth = percentileOf(solidFront.bytes, ws * ws, 0.95) / 255.0;
             scene.tearJump = AUTune(@"tear");
         }
-        NSMutableData *tallDepth = [NSMutableData dataWithLength:side * tallHigh], *tallHoles = [NSMutableData dataWithLength:side * tallHigh];
-        memcpy(tallDepth.mutableBytes, depthMap.bytes, n);
-        memcpy(tallHoles.mutableBytes, g, n);
-        for (size_t y = side; y < tallHigh; y++) memcpy((uint8_t *)tallDepth.mutableBytes + y * side, (const uint8_t *)depthMap.bytes + (side - 1) * side, side);
+        NSData *tallDepth = depthAround(depthMap.bytes, side, aboveHigh, tallHigh);
+        NSMutableData *tallHoles = [NSMutableData dataWithLength:side * tallHigh];
+        memcpy((uint8_t *)tallHoles.mutableBytes + aboveHigh * side, g, n);
         CGImageRef plate = solid ? NULL : plateDepthOf(tallDepth.bytes, tallHoles.bytes, side, tallHigh);
         if (plate) {
             scene.plateDepth = [UIImage imageWithCGImage:plate];

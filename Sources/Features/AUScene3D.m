@@ -92,7 +92,8 @@ typedef struct {
     AUCamera camera;
     const uint8_t *plate, *raw;
     size_t plateSide, plateHigh, rawSide;
-    double tall;            // the plate's height over its width: v runs 0...tall over it
+    double tall;            // the plate's height over its width: v runs -top...tall - top over it
+    double top;             // the plate's room above the cover
     double still, median, relief;
     BOOL object, mirror;
 } AUZContext;
@@ -103,10 +104,10 @@ static inline double zAt(const AUZContext *c, double qx, double qy) {
         if (!c->raw) return AUCameraZ(c->camera, c->median);
         return AUCameraObjectZ(c->camera, gray(c->raw, c->rawSide, c->rawSide, mirror(u), mirror(v)), c->median, c->relief);
     }
-    if (c->mirror) return c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, c->plateHigh, mirror(u), mirror(v) / c->tall)) : c->still;
+    if (c->mirror) return c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, c->plateHigh, mirror(u), (mirror(v) + c->top) / c->tall)) : c->still;
     double inside = c->plate ? AUCameraZ(c->camera, gray(c->plate, c->plateSide, c->plateHigh, MAX(0.0, MIN(1.0, u)),
-                                                       MAX(0.0, MIN(1.0, v / c->tall)))) : c->still;
-    double out = MAX(0.0, MAX(MAX(-u, u - 1), MAX(-v, v - c->tall)));
+                                                       MAX(0.0, MIN(1.0, (v + c->top) / c->tall)))) : c->still;
+    double out = MAX(0.0, MAX(MAX(-u, u - 1), MAX(-(v + c->top), v - (c->tall - c->top))));
     double t = MIN(1.0, out / 0.05);
     t = t * t * (3 - 2 * t);
     return inside * (1 - t) + c->camera.zOut * t;
@@ -128,7 +129,7 @@ void AUSceneDraw3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect s
     AUTurn turn = turnOf(camera);
     NSData *plate = scene.plateBytes, *raw = scene.rawBytes;
     AUZContext context = {camera, plate.bytes, raw.bytes, scene.plateSide, scene.plateHigh, scene.rawSide,
-                          scene.plateHigh && scene.plateSide ? scene.plateHigh / (double)scene.plateSide : 1,
+                          scene.plateHigh && scene.plateSide ? scene.plateHigh / (double)scene.plateSide : 1, scene.tallTop,
                           AUCameraZ(camera, scene.backgroundDepth), source.median, source.relief, source.object, source.mirror};
     const AUZContext *zc = &context;
     double midX = CGRectGetMidX(square), midY = CGRectGetMidY(square), sw = square.size.width, sh = square.size.height;
@@ -228,7 +229,7 @@ CGRect AUSceneAlphaBox(const uint8_t *pixels, size_t row, size_t side) {
 // its alpha (premultiplied), so a pixel written twice is not blended twice.
 void AUSceneSplat3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect square, AUCamera camera,
                     const uint8_t *pixels, size_t row, size_t width, size_t height,
-                    const uint8_t *depth, size_t depthSide, size_t depthHigh, double tear) {
+                    const uint8_t *depth, size_t depthSide, size_t depthHigh, double tear, double top) {
     if (!frame || !pixels || !depth || width < 2 || height < 2 || square.size.width < 1) return;
     AUTurn turn = turnOf(camera);
     // Picture units: the side is 1, the cover's middle (0, 0); rows below the square go on past 0.5.
@@ -258,7 +259,7 @@ void AUSceneSplat3D(uint8_t *frame, size_t frameRow, size_t w, size_t h, CGRect 
                     size_t dx = MIN(depthSide - 1, (size_t)((x + 0.5) * depthSide / width));
                     uint8_t dv = depth[dy * depthSide + dx];
                     double z = AUCameraZ(camera, dv / 255.0);
-                    double qx = (x + 0.5) / width - 0.5, qy = (yy + 0.5) / width - 0.5;
+                    double qx = (x + 0.5) / width - 0.5, qy = (yy + 0.5) / width - 0.5 - top;
                     double sx, sy;
                     project(turn, qx, qy, z, &sx, &sy);
                     ax[r * width + x] = midX + sx * sw;

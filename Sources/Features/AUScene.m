@@ -2,7 +2,7 @@
 #import "AUImage.h"
 #import "Core/AUTune.h"
 
-static NSString *const kVersion = @"scene-v6";
+static NSString *const kVersion = @"scene-v7";
 
 @implementation AUSceneLayer
 - (instancetype)init {
@@ -73,6 +73,7 @@ static const double kPlateLimit = 0.6, kObjectLeast = 0.3;
     return self;
 }
 - (double)tallness { return _tall && _tallness >= 1 ? _tallness : 1; }
+- (double)tallTop { return _tall ? MAX(0.0, _tallTop) : 0; }
 - (double)plateLimit { return kPlateLimit; }
 
 - (double)plateFactorOf:(double)depth {
@@ -143,7 +144,9 @@ static NSData *grayBytes(CGImageRef image, size_t *outSide) {
     double reach = 0;
     size_t histogram[256] = {0};
     // The far end over the cover's own square (the room below is the floor carried on).
-    size_t square = MIN(high, side);
+    size_t square = MIN(high, side), skip = (size_t)lround(self.tallTop * side);
+    if (skip + square > high) skip = 0;
+    p += skip * side;
     for (size_t i = 0; i < side * square; i++) {
         reach = MAX(reach, fabs([self plateFactorOf:p[i] / 255.0]));
         histogram[p[i]]++;
@@ -199,7 +202,7 @@ static NSData *grayBytes(CGImageRef image, size_t *outSide) {
     NSDictionary *plist = @{@"version": kVersion, @"square": @[@(_square.origin.x), @(_square.origin.y), @(_square.size.width), @(_square.size.height)],
                             @"depths": depths, @"backgroundDepth": @(_backgroundDepth), @"inpainted": @(_inpainted), @"segmented": @(_segmented), @"tallness": @(_tallness), @"tune": _tune ?: @"", @"reliefs": reliefs,
                             @"style": @[@(_styleSwing), @(_styleDeep), @(_styleRelief)], @"styleName": _styleName ?: @"",
-                            @"nearDepth": @(_nearDepth), @"tearJump": @(_tearJump)};
+                            @"nearDepth": @(_nearDepth), @"tearJump": @(_tearJump), @"tallTop": @(_tallTop)};
     return [plist writeToFile:[folder stringByAppendingPathComponent:@"scene.plist"] atomically:YES];
 }
 
@@ -251,6 +254,7 @@ static NSData *grayBytes(CGImageRef image, size_t *outSide) {
     if (tall) {
         scene.tall = [UIImage imageWithCGImage:tall];
         scene.tallness = [plist[@"tallness"] doubleValue] ?: CGImageGetHeight(tall) / (double)CGImageGetWidth(tall);
+        scene.tallTop = [plist[@"tallTop"] doubleValue];
         CGImageRelease(tall);
     }
     NSMutableArray *layers = [NSMutableArray array];

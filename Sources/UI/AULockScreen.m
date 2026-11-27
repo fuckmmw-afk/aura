@@ -158,10 +158,11 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     double zoom = l.moving ? AUSceneZoom(l.strength) : 1.0;
     double side = size.width * zoom;
     l.side = side;
-    // With the room painted below the cover, the cover sits at the top and the picture runs down the whole frame;
-    // without it, a little above the middle with its own rows carried out.
+    // With the rooms painted around the cover, the cover sits with its middle at «Положение обложки» and the picture
+    // runs above and below it; without them, a little above the middle with its own rows carried out.
     double tallness = scene.tall ? scene.tallness : 1;
-    double top = scene.tall ? (size.width - side) / 2 : (size.height - side) * 0.42;
+    double top = scene.tall ? size.height * AUTune(@"lockCenter") - side / 2 : (size.height - side) * 0.42;
+    double above = scene.tallTop * side;   // the painted room over the cover
     l.square = CGRectMake((size.width - side) / 2, top, side, side);
     size_t margin = l.moving ? (size_t)ceil(side * 0.2) : 0;
     l.margin = margin;
@@ -169,18 +170,18 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     CGContextRef base = bgraContext((size_t)baseSize.width, (size_t)baseSize.height, NULL, 0);
     // Core Graphics counts from the bottom.
     double pictureHigh = side * tallness;
-    CGRect inBase = CGRectMake(l.square.origin.x + margin, baseSize.height - (top + margin) - pictureHigh, side, pictureHigh);
+    CGRect inBase = CGRectMake(l.square.origin.x + margin, baseSize.height - (top - above + margin) - pictureHigh, side, pictureHigh);
     CGContextSetInterpolationQuality(base, kCGInterpolationHigh);
     CGContextDrawImage(base, inBase, (scene.tall ?: scene.background).CGImage);
-    CGRect pictureTopDown = CGRectMake(inBase.origin.x, top + margin, side, pictureHigh);
+    CGRect pictureTopDown = CGRectMake(inBase.origin.x, top - above + margin, side, pictureHigh);
     // The blur only at the foot: from 0.74 of the frame (the picture's own foot when it is shorter) to the bottom.
     double footFrom = scene.tall ? margin + size.height * AUTune(@"lockBlurFrom") : margin + top + side - side * 0.16;
     double footTo = scene.tall ? margin + size.height * AUTune(@"lockBlurTo") : margin + top + side + side * 0.5;
-    footFrom = MIN(footFrom, margin + top + pictureHigh - side * 0.1);
+    footFrom = MIN(footFrom, margin + top - above + pictureHigh - side * 0.1);
     extendCover(base, pictureTopDown, side, footFrom, MAX(footFrom + side * 0.15, footTo));
     l.background = CGBitmapContextCreateImage(base);
     l.base = base;
-    l.frontTop = top;
+    l.frontTop = top - above;
     if (scene.solid) {
         // The cover itself as one surface over the painted background; it fades out where the blur at the foot comes
         // in, so the blurred room (the background's) carries on below it.
@@ -194,7 +195,7 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
             CGContextDrawImage(fc, CGRectMake(0, 0, fw, fh), f);
             uint8_t *fp = CGBitmapContextGetData(fc);
             size_t frow = CGBitmapContextGetBytesPerRow(fc);
-            double fadeFrom = (footFrom - margin - top) * fw / side, fadeTo = fadeFrom + 0.15 * fw;
+            double fadeFrom = (footFrom - margin - (top - above)) * fw / side, fadeTo = fadeFrom + 0.15 * fw;
             for (size_t y = 0; y < fh; y++) {
                 double t = MAX(0.0, MIN(1.0, (y - fadeFrom) / (fadeTo - fadeFrom)));
                 t = t * t * (3 - 2 * t);
@@ -262,7 +263,7 @@ static void drawFrame(CGContextRef context, AUClipLayers *l, AUScene *scene, dou
         if (l->front && scene.frontBytes) {
             AUSceneSplat3D(frame, row, w, h, l->square, camera, CGBitmapContextGetData(l->front), CGBitmapContextGetBytesPerRow(l->front),
                            CGBitmapContextGetWidth(l->front), CGBitmapContextGetHeight(l->front), scene.frontBytes.bytes,
-                           scene.frontSide, scene.frontHigh, scene.tearJump);
+                           scene.frontSide, scene.frontHigh, scene.tearJump, scene.tallTop);
         }
     } else {
         CGContextSetBlendMode(context, kCGBlendModeCopy);

@@ -451,12 +451,17 @@ static void applyBlur(AUSurface *surface, CGFloat stageHigh) {
 - (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {
     double reach = singleLayer() ? kSingleReach : surface.content ? surface.content.plateReach : 0.3;
     if (surface.kind == AUSurfaceFill && (surface.renderer || singleLayer())) {
-        // The cover across the stage's width from its top, the room below it after; zoomed round the cover's middle.
+        // The cover across the stage's width, its middle at «Положение обложки» of the stage's height, the rooms LaMa
+        // painted above and below it; zoomed round the cover's middle.
         CGFloat side0 = bounds.size.width * AUTune(@"fillCrop");
         CGFloat zoom = !_shownMoving ? 1 : surface.renderer ? AUSceneZoom(AUNumber(AUKeyDepthStrength, 1.0)) : 1 + 2 * kSingleReach * strengthNow() + 0.006;
         CGFloat side = side0 * zoom;
         CGFloat tall = surface.renderer ? surface.renderer.frameTall : 1;
-        surface.pictureRect = CGRectMake((bounds.size.width - side) / 2, (side0 - side) / 2, side, side * tall);
+        CGFloat above = surface.renderer ? surface.renderer.frameTop : 0;
+        // Never lower than the stage's top would leave uncovered (a cover with no room painted above it).
+        CGFloat middle = bounds.size.height * AUTune(@"fillCenter");
+        if (above * side < middle - side / 2) middle = MAX(side0 / 2, above * side + side / 2);
+        surface.pictureRect = CGRectMake((bounds.size.width - side) / 2, middle - side / 2 - above * side, side, side * tall);
     } else {
         surface.pictureRect = pictureRectIn((CGRect){CGPointZero, bounds.size}, [self pictureSizeFor:surface], _shownMoving, reach,
                                             surface.renderer != nil);

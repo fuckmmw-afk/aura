@@ -17,6 +17,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong) UIImage *background;            // the cover with its objects painted out
 @property (nonatomic, strong, nullable) UIImage *tall;        // the same with the room below it painted on (Fill, lock screen)
 @property (nonatomic) double tallness;                        // tall's height over its width (1 when there is none)
+@property (nonatomic) double tallTop;                         // the room painted above the cover in `tall` (and in
+                                                              // front, plateDepth, frontDepth), a share of the side
 @property (nonatomic, strong, nullable) UIImage *plateDepth;  // the background's depth (over `tall` when there is one): smooth
 @property (nonatomic, strong, nullable) UIImage *rawDepth;    // the model's depth as it is (256 px): the objects' own relief
 @property (nonatomic) CGRect square;                          // where the cover sits in the canvas, pixels, origin top left

@@ -50,7 +50,7 @@ static void splatFront(CGContextRef c, CGRect square, AUScene *scene, AUCamera c
     CGContextDrawImage(fc, CGRectMake(0, 0, fw, fh), f);
     AUSceneSplat3D(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), CGBitmapContextGetWidth(c), CGBitmapContextGetHeight(c),
                    square, camera, CGBitmapContextGetData(fc), CGBitmapContextGetBytesPerRow(fc), fw, fh, scene.frontBytes.bytes,
-                   scene.frontSide, scene.frontHigh, scene.tearJump);
+                   scene.frontSide, scene.frontHigh, scene.tearJump, scene.tallTop);
     CGContextRelease(fc);
 }
 
@@ -64,7 +64,9 @@ static CGImageRef fillGPU(AUScene *scene, CGPoint tilt) {
     r.tilt = tilt;
     r.zoom = 1;
     double side0 = W * AUTune(@"fillCrop"), side = side0 * AUSceneZoom(1), tall = r.frameTall;
-    CGRect pic = CGRectMake((W - side) / 2, (side0 - side) / 2, side, side * tall);
+    double above = r.frameTop * side, middle = H * AUTune(@"fillCenter");
+    if (above < middle - side / 2) middle = MAX(side0 / 2, above + side / 2);
+    CGRect pic = CGRectMake((W - side) / 2, middle - side / 2 - above, side, side * tall);
     double f1 = AUTune(@"blur1From"), t1 = MAX(f1 + 0.01, AUTune(@"blur1To")), f2 = AUTune(@"blur2From"), t2 = MAX(f2 + 0.01, AUTune(@"blur2To"));
     double y = pic.origin.y, h = pic.size.height;
     [r setBlurRamp1:CGPointMake((f1 * H - y) / h, (t1 * H - y) / h) size1:AUTune(@"blur1Size") / 100
@@ -133,8 +135,10 @@ static CGImageRef sceneFrame(AUScene *scene, CGPoint tilt, CGSize size) {
 static CGImageRef fillFrame(AUScene *scene, CGPoint tilt, CGSize size) {
     if (!scene.tall) return NULL;
     size_t w = (size_t)size.width, h = (size_t)size.height;
-    double side0 = size.width * 1.12, drawn = side0 * AUSceneZoom(1);
-    CGRect square = CGRectMake((size.width - drawn) / 2, (side0 - drawn) / 2, drawn, drawn);
+    double side0 = size.width * AUTune(@"fillCrop"), drawn = side0 * AUSceneZoom(1);
+    double middle = size.height * AUTune(@"fillCenter");
+    if (scene.tallTop * drawn < middle - drawn / 2) middle = MAX(side0 / 2, scene.tallTop * drawn + drawn / 2);
+    CGRect square = CGRectMake((size.width - drawn) / 2, middle - drawn / 2, drawn, drawn);
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGBitmapInfo info = kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big;
     size_t side = CGImageGetWidth(scene.tall.CGImage), high = CGImageGetHeight(scene.tall.CGImage);
@@ -143,7 +147,7 @@ static CGImageRef fillFrame(AUScene *scene, CGPoint tilt, CGSize size) {
     CGContextDrawImage(back, CGRectMake(0, 0, side, high), scene.tall.CGImage);
     AUCamera camera = AUSceneCamera(scene, tilt, 1);
     AUSceneSource source = {CGBitmapContextGetData(back), CGBitmapContextGetBytesPerRow(back), side, high,
-                            CGRectMake(0, 0, side, side), NO, 0, NO, CGRectNull};
+                            CGRectMake(0, lround(scene.tallTop * side), side, side), NO, 0, NO, CGRectNull};
     AUSceneDraw3D(CGBitmapContextGetData(c), CGBitmapContextGetBytesPerRow(c), w, h, square, scene, camera, source);
     CGContextRelease(back);
     for (AUSceneLayer *layer in scene.layers) {
