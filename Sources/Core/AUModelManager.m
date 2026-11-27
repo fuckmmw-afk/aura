@@ -19,10 +19,14 @@ static const NSTimeInterval kIdleUnload = 300;
 @property (nonatomic, strong) MLModel *loaded;
 @property (nonatomic) CFTimeInterval lastUse;
 @property (nonatomic) NSTimeInterval idle;   // unloaded after this long unused
+@property (nonatomic) NSInteger refetches;   // fetched again after a failed load, this launch
+@property (nonatomic) CFTimeInterval failedUntil;   // a failed load is not tried again before this
 @end
 
 @implementation AUModelEntry
 @end
+
+static BOOL AUAppInBackground(void);
 
 @implementation AUModelManager {
     NSDictionary<NSString *, AUModelEntry *> *_entries;
@@ -42,6 +46,7 @@ static const NSTimeInterval kIdleUnload = 300;
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     _lock = [NSLock new];
+    AUAppInBackground();   // starts following the app's state
     _work = dispatch_queue_create("aura.models", DISPATCH_QUEUE_SERIAL);
     NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.timeoutIntervalForRequest = 30;
@@ -330,6 +335,22 @@ static const NSTimeInterval kIdleUnload = 300;
 
 #pragma mark - load and unload
 
+// Whether the app is in the background, kept from its notifications (read from any queue, never waiting on main).
+static _Atomic BOOL sBackground;
+
+static BOOL AUAppInBackground(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            sBackground = UIApplication.sharedApplication.applicationState == UIApplicationStateBackground;
+            NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+            [center addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:nil usingBlock:^(NSNotification *n) { sBackground = YES; }];
+            [center addObserverForName:UIApplicationWillEnterForegroundNotification object:nil queue:nil usingBlock:^(NSNotification *n) { sBackground = NO; }];
+        });
+    });
+    return sBackground;
+}
+
 - (MLModel *)modelFor:(NSString *)modelID {
     AUModelEntry *entry = [self entry:modelID];
     if (!entry) return nil;
@@ -343,30 +364,49 @@ static const NSTimeInterval kIdleUnload = 300;
         if (state == AUModelMissing) [self ensure:modelID];
         return nil;
     }
+    if (CACurrentMediaTime() < entry.failedUntil) return nil;
     CFTimeInterval started = CACurrentMediaTime();
-    MLModelConfiguration *configuration = [MLModelConfiguration new];
-    // LaMa on the CPU: for the Neural Engine it took minutes to compile, seconds to load each time and over a
-    // gigabyte; at 256 px on the CPU it loads at once and stays small. The rest on CPU and Neural Engine (the GPU is
-    // not there for a backgrounded app, which is when a locked phone moves to the next track).
     // LaMa: CPU (the Neural Engine compiles it for minutes); SAM's point and mask parts: CPU + GPU (the Neural Engine
-    // cannot place their transposed convolution's shape).
+    // cannot place their transposed convolution's shape) — but a backgrounded app (a locked phone moving to the next
+    // track) has no GPU: then the CPU alone. The rest on CPU and Neural Engine.
+    BOOL background = AUAppInBackground();
+    BOOL samPart = [modelID isEqualToString:AUModelSamDecoder] || [modelID isEqualToString:AUModelSamPrompt];
+    MLModelConfiguration *configuration = [MLModelConfiguration new];
     if ([modelID isEqualToString:AUModelInpaint]) configuration.computeUnits = MLComputeUnitsCPUOnly;
-    else if ([modelID isEqualToString:AUModelSamDecoder] || [modelID isEqualToString:AUModelSamPrompt]) configuration.computeUnits = MLComputeUnitsCPUAndGPU;
+    else if (samPart) configuration.computeUnits = background ? MLComputeUnitsCPUOnly : MLComputeUnitsCPUAndGPU;
     else configuration.computeUnits = MLComputeUnitsCPUAndNeuralEngine;
     NSError *error = nil;
     model = [MLModel modelWithContentsOfURL:[self compiledURL:entry] configuration:configuration error:&error];
+    if (!model && configuration.computeUnits != MLComputeUnitsCPUOnly) {
+        // The same files on the CPU alone before anything is thrown away.
+        configuration.computeUnits = MLComputeUnitsCPUOnly;
+        NSError *again = nil;
+        model = [MLModel modelWithContentsOfURL:[self compiledURL:entry] configuration:configuration error:&again];
+        if (model) AULog(@"model %@: loaded on the CPU alone (%@)", modelID, error.localizedDescription);
+    }
     if (!model) {
-        AULog(@"model %@ failed to load: %@; it is fetched again", modelID, error.localizedDescription);
-        [NSFileManager.defaultManager removeItemAtURL:[self compiledURL:entry] error:nil];
+        // Fetched again once a launch at most; after that it waits ten minutes between tries. (A loop of fetching,
+        // failing and fetching again ran all night once: the network busy without end.)
+        BOOL refetch = entry.refetches < 1;
+        AULog(@"model %@ failed to load: %@; %@", modelID, error.localizedDescription, refetch ? @"it is fetched again" : @"not tried again for 10 min");
         [_lock lock];
-        entry.state = AUModelMissing;
+        if (refetch) {
+            entry.refetches++;
+            entry.state = AUModelMissing;
+        } else {
+            entry.failedUntil = CACurrentMediaTime() + 600;
+        }
         [_lock unlock];
-        [self changed:entry];
+        if (refetch) {
+            [NSFileManager.defaultManager removeItemAtURL:[self compiledURL:entry] error:nil];
+            [self changed:entry];
+        }
         return nil;
     }
     double ms = (CACurrentMediaTime() - started) * 1000;
     AUStatRecord([@"load." stringByAppendingString:modelID], ms);
-    AULog(@"model %@ loaded in %.0f ms (CPU + Neural Engine), footprint %@", modelID, ms, AUBytes(AUFootprint()));
+    NSString *units = configuration.computeUnits == MLComputeUnitsCPUOnly ? @"CPU" : configuration.computeUnits == MLComputeUnitsCPUAndGPU ? @"CPU + GPU" : @"CPU + Neural Engine";
+    AULog(@"model %@ loaded in %.0f ms (%@), footprint %@", modelID, ms, units, AUBytes(AUFootprint()));
     [_lock lock];
     if (!entry.loaded) entry.loaded = model;
     model = entry.loaded;
