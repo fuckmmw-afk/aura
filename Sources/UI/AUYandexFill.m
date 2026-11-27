@@ -190,6 +190,28 @@ void AUYandexFillUpdate(UIView *artworkView, UICollectionView *carousel) {
     }
     UIImage *image = AUYandexArtwork(NULL, NULL, NULL);
     if (image) [fill setPicture:image];
+    // The artwork view's own background and its gradient lie over the fill (inside the player's card): they go too.
+    for (NSString *name in @[@"backgroundContainer", @"gradientOverlayView"]) {
+        Ivar part = class_getInstanceVariable(object_getClass(artworkView), name.UTF8String);
+        id view = part ? object_getIvar(artworkView, part) : nil;
+        if (![view isKindOfClass:UIView.class]) continue;
+        UIView *v = view;
+        static NSMutableSet *told;
+        if (!told) told = [NSMutableSet set];
+        if (![told containsObject:name]) {
+            [told addObject:name];
+            CGRect r = [v convertRect:v.bounds toView:nil];
+            AULog(@"yandex: %@ %@ %.0f,%.0f %.0fx%.0f, alpha %.2f%@", name, NSStringFromClass(v.class), r.origin.x, r.origin.y, r.size.width,
+                  r.size.height, v.alpha, v.layer.sublayers.count ? [NSString stringWithFormat:@", %lu sublayers", (unsigned long)v.layer.sublayers.count] : @"");
+        }
+        if (v.alpha != 0) {
+            v.alpha = 0;
+            [sHidden addObject:v];
+        }
+    }
+    Ivar gradient = class_getInstanceVariable(object_getClass(artworkView), "gradientLayer");
+    id gradientLayer = gradient ? object_getIvar(artworkView, gradient) : nil;
+    if ([gradientLayer isKindOfClass:CALayer.class]) ((CALayer *)gradientLayer).hidden = YES;
     // The carousel's covers give way (still there to be swiped).
     for (UICollectionViewCell *cell in carousel.visibleCells) {
         UIView *content = cell.contentView;

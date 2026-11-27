@@ -132,15 +132,58 @@ static void swapLayerColor(Class cls, SEL sel) {
     });
 }
 
-static struct rebinding sColorRebindings[3];
+// SwiftUI's own colours, as the app's code makes them (Color(red:green:blue:), Color(hue:…), Color.yellow): Swift
+// functions it imports from SwiftUI, rebound like C ones. Their arguments sit where C would put them: the resilient
+// RGBColorSpace by address in x0, the components in d0–d3; the Color comes back in x0.
+static void *(*origColorRGB)(void *, double, double, double, double);
+static void *(*origColorHSB)(double, double, double, double);
+static void *(*origColorYellow)(void);
+static void *(*colorWhite)(void);
+static _Atomic int sSwiftHits;
+
+static void swiftHit(const char *what) {
+    if (sSwiftHits++ < 3) {
+        NSString *name = @(what);
+        dispatch_async(dispatch_get_main_queue(), ^{ AULog(@"white: SwiftUI %@ made white", name); });
+    }
+}
+
+static void *whiteColorRGB(void *space, double r, double g, double b, double o) {
+    if (yellowish(r, g, b)) {
+        swiftHit("Color(red:green:blue:)");
+        r = g = b = 1;
+    }
+    return origColorRGB(space, r, g, b, o);
+}
+
+static void *whiteColorHSB(double h, double s, double v, double o) {
+    if (v >= 0.70 && s >= 0.45 && h * 360 >= 38 && h * 360 <= 64) {
+        swiftHit("Color(hue:)");
+        s = 0;
+        v = 1;
+    }
+    return origColorHSB(h, s, v, o);
+}
+
+static void *whiteColorYellow(void) {
+    swiftHit("Color.yellow");
+    return colorWhite ? colorWhite() : origColorYellow();
+}
+
+static struct rebinding sColorRebindings[6];
 
 static void addedImage(const struct mach_header *header, intptr_t slide) {
     Dl_info info;
     if (!dladdr(header, &info) || !info.dli_fname || !strstr(info.dli_fname, ".app/")) return;
-    struct rebinding copy[3];
-    memcpy(copy, sColorRebindings, sizeof(copy));
-    for (int i = 0; i < 3; i++) copy[i].replaced = NULL;
-    rebind_symbols_image((void *)header, slide, copy, 3);
+    struct rebinding copy[6];
+    int n = 0;
+    for (int i = 0; i < 6; i++) {
+        if (!sColorRebindings[i].name || !sColorRebindings[i].replacement) continue;
+        copy[n] = sColorRebindings[i];
+        copy[n].replaced = NULL;
+        n++;
+    }
+    rebind_symbols_image((void *)header, slide, copy, (size_t)n);
 }
 
 void AUYandexColorsInstall(void) {
@@ -183,10 +226,17 @@ void AUYandexColorsInstall(void) {
     origCreate = CGColorCreate;
     origSRGB = CGColorCreateSRGB;
     origGeneric = CGColorCreateGenericRGB;
-    struct rebinding rebindings[3] = {
+    origColorRGB = dlsym(RTLD_DEFAULT, "$s7SwiftUI5ColorV_3red5green4blue7opacityA2C13RGBColorSpaceO_S4dtcfC");
+    origColorHSB = dlsym(RTLD_DEFAULT, "$s7SwiftUI5ColorV3hue10saturation10brightness7opacityACSd_S3dtcfC");
+    origColorYellow = dlsym(RTLD_DEFAULT, "$s7SwiftUI5ColorV6yellowACvgZ");
+    colorWhite = dlsym(RTLD_DEFAULT, "$s7SwiftUI5ColorV5whiteACvgZ");
+    struct rebinding rebindings[6] = {
         {"CGColorCreate", (void *)whiteCreate, NULL},
         {"CGColorCreateSRGB", (void *)whiteSRGB, NULL},
         {"CGColorCreateGenericRGB", (void *)whiteGeneric, NULL},
+        {origColorRGB ? "$s7SwiftUI5ColorV_3red5green4blue7opacityA2C13RGBColorSpaceO_S4dtcfC" : NULL, origColorRGB ? (void *)whiteColorRGB : NULL, NULL},
+        {origColorHSB ? "$s7SwiftUI5ColorV3hue10saturation10brightness7opacityACSd_S3dtcfC" : NULL, origColorHSB ? (void *)whiteColorHSB : NULL, NULL},
+        {origColorYellow && colorWhite ? "$s7SwiftUI5ColorV6yellowACvgZ" : NULL, origColorYellow && colorWhite ? (void *)whiteColorYellow : NULL, NULL},
     };
     memcpy(sColorRebindings, rebindings, sizeof(rebindings));
     _dyld_register_func_for_add_image(addedImage);

@@ -243,24 +243,51 @@ void AUYandexRemoteHandlerAdded(id command, id handler, id target, SEL action) {
     }
 }
 
+// MPChangePlaybackPositionCommandEvent will not be made by hand (its init throws): a subclass of our own, made
+// without init, answers what the app's handler reads (positionTime, command, timestamp).
+static Class seekEventClass(void) {
+    static Class cls;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class base = NSClassFromString(@"MPChangePlaybackPositionCommandEvent");
+        if (!base) return;
+        cls = objc_allocateClassPair(base, "AUSeekEvent", 0);
+        if (!cls) {
+            cls = NSClassFromString(@"AUSeekEvent");
+            return;
+        }
+        class_addMethod(cls, @selector(positionTime), imp_implementationWithBlock(^double(id self) {
+            return [objc_getAssociatedObject(self, @selector(positionTime)) doubleValue];
+        }), "d@:");
+        class_addMethod(cls, @selector(command), imp_implementationWithBlock(^id(id self) {
+            return MPRemoteCommandCenter.sharedCommandCenter.changePlaybackPositionCommand;
+        }), "@@:");
+        class_addMethod(cls, @selector(timestamp), imp_implementationWithBlock(^double(id self) {
+            return NSProcessInfo.processInfo.systemUptime;
+        }), "d@:");
+        objc_registerClassPair(cls);
+    });
+    return cls;
+}
+
 BOOL AUYandexSeek(double seconds) {
-    Class eventClass = NSClassFromString(@"MPChangePlaybackPositionCommandEvent");
-    if (!eventClass || (!sg_seekHandler && !sg_seekTarget)) {
+    Class cls = seekEventClass();
+    if (!cls || (!sg_seekHandler && !sg_seekTarget)) {
         AULog(@"yandex: no seek handler from the app");
         return NO;
     }
-    id event = [eventClass new];
     @try {
-        [event setValue:@(seconds) forKey:@"positionTime"];
+        id event = class_createInstance(cls, 0);
+        objc_setAssociatedObject(event, @selector(positionTime), @(seconds), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (sg_seekHandler) {
+            MPRemoteCommandHandlerStatus (^handler)(MPRemoteCommandEvent *) = sg_seekHandler;
+            handler(event);
+        } else {
+            ((void (*)(id, SEL, id))objc_msgSend)(sg_seekTarget, sg_seekAction, event);
+        }
     } @catch (NSException *e) {
-        AULog(@"yandex: the seek event takes no time: %@", e.reason);
+        AULog(@"yandex: seeking failed: %@", e.reason);
         return NO;
-    }
-    if (sg_seekHandler) {
-        MPRemoteCommandHandlerStatus (^handler)(MPRemoteCommandEvent *) = sg_seekHandler;
-        handler(event);
-    } else {
-        ((void (*)(id, SEL, id))objc_msgSend)(sg_seekTarget, sg_seekAction, event);
     }
     // Shown at once, before the app reports the new position.
     sg_elapsed = seconds;
@@ -336,6 +363,7 @@ static NSString *treeOf(UIView *root, int depth, int maxDepth, NSUInteger *lines
 
 static void installGesture(UIView *view);
 static BOOL miniLyricsVisible(void);
+static __weak UIView *sArtworkView, *sCentredCell;
 
 // The player's own copy of the playing cover, when it is the same picture bigger than the one in the now playing
 // info: it takes that one's place.
@@ -355,7 +383,12 @@ static void offerPlayerCopy(UIView *cover, UIScrollView *list) {
 }
 
 void AUYandexArtworkViewLaidOut(UIView *view) {
-    if (!visibleView(view)) return;
+    sArtworkView = view;
+    if (!visibleView(view)) {
+        // The card's cover gone (the app's lyrics folded in): Aura's lyrics may go there.
+        AULyricsMiniUpdate(view, sCentredCell, ^BOOL { return miniLyricsVisible(); });
+        return;
+    }
     static BOOL dumped;
     if (!dumped && view.bounds.size.width >= 200) {
         dumped = YES;
@@ -419,6 +452,7 @@ void AUYandexArtworkViewLaidOut(UIView *view) {
             }
         }
     }
+    if (centred) sCentredCell = centred;
     AULyricsMiniUpdate(view, centred, ^BOOL { return miniLyricsVisible(); });
 }
 
@@ -453,26 +487,63 @@ static void *swiftObjectField(id object, const char *name) {
     return raw;
 }
 
-// TrackLyricsViewModel.isMiniLyricsVisible: the app's lyrics folded into the cover's card.
+static NSString *cellSignature(UIView *cell, int depth) {
+    if (!cell || depth > 6) return @"";
+    NSMutableString *out = [NSMutableString stringWithFormat:@"%@%@%@", NSStringFromClass(cell.class), cell.hidden ? @"(h)" : @"",
+                                                            cell.alpha < 0.05 ? @"(a0)" : @""];
+    if (cell.subviews.count) {
+        [out appendString:@"["];
+        for (UIView *sub in cell.subviews) {
+            if ([NSStringFromClass(sub.class) hasPrefix:@"AU"]) continue;
+            [out appendFormat:@"%@,", cellSignature(sub, depth + 1)];
+        }
+        [out appendString:@"]"];
+    }
+    return out;
+}
+
+// The artwork view (the card's cover) hidden or transparent on its way up to the player's view.
+static BOOL artworkGone(void) {
+    UIView *artwork = sArtworkView, *root = sPlayer.viewIfLoaded;
+    if (!artwork.window || !root.window) return NO;
+    for (UIView *v = artwork; v && v != root; v = v.superview) {
+        if (v.hidden || v.alpha < 0.05) return YES;
+    }
+    return NO;
+}
+
+// The app's lyrics folded into the cover's card: TrackLyricsViewModel.isMiniLyricsVisible, or the card's cover gone
+// while the player shows. What changes when it folds them in is logged (the model's display state, the centred cell).
 static BOOL miniLyricsVisible(void) {
     static int told;
     UIViewController *player = sPlayer;
+    BOOL flag = NO;
+    NSString *state = @"-";
     void *model = swiftObjectField(player, "trackLyricsViewModel");
-    if (!model) {
-        if (player && told++ < 2) AULog(@"lyrics: no trackLyricsViewModel in %@", NSStringFromClass(player.class));
-        return NO;
+    if (model) {
+        id object = (__bridge id)model;
+        Ivar mini = class_getInstanceVariable(object_getClass(object), "isMiniLyricsVisible");
+        if (mini) flag = *((uint8_t *)model + ivar_getOffset(mini)) != 0;
+        Ivar display = class_getInstanceVariable(object_getClass(object), "_displayState");
+        if (display) {
+            const uint8_t *bytes = (const uint8_t *)model + ivar_getOffset(display);
+            NSMutableString *hex = [NSMutableString string];
+            for (int i = 0; i < 32; i++) [hex appendFormat:@"%02x", bytes[i]];
+            state = hex;
+        }
+    } else if (player && told++ < 2) {
+        AULog(@"lyrics: no trackLyricsViewModel in %@", NSStringFromClass(player.class));
     }
-    id object = (__bridge id)model;
-    Ivar flag = class_getInstanceVariable(object_getClass(object), "isMiniLyricsVisible");
-    if (!flag) {
-        if (told++ < 2) AULog(@"lyrics: %@ has no isMiniLyricsVisible", NSStringFromClass(object_getClass(object)));
-        return NO;
-    }
-    BOOL on = *((uint8_t *)model + ivar_getOffset(flag)) != 0;
-    static int last = -1;
-    if (on != last) {
-        last = on;
-        AULog(@"lyrics: the app's folded lyrics %@", on ? @"shown" : @"hidden");
+    BOOL gone = artworkGone();
+    BOOL on = flag || gone;
+    static NSString *last;
+    NSString *now = [NSString stringWithFormat:@"%d%d %@", flag, gone, state];
+    static int lines;
+    if (![now isEqualToString:last] && lines < 40) {
+        last = now;
+        lines++;
+        AULog(@"lyrics: folded %@ (flag %d, card's cover gone %d), display state %@\n  centred cell: %@", on ? @"shown" : @"hidden", flag, gone,
+              state, cellSignature(sCentredCell, 0));
     }
     return on;
 }

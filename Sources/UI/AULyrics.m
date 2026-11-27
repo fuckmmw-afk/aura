@@ -937,10 +937,13 @@ static AULyricsView *miniView(void) {
 static void AULyricsMiniRefresh(void) {
     AULyricsView *view = sMini;
     UIView *artwork = sMiniArtwork, *cell = sMiniCell;
-    BOOL want = AUEnabled(AUKeyLyrics) && artwork.window && cell.window && sMiniVisible && sMiniVisible();
     if (!view) return;
+    BOOL want = AUEnabled(AUKeyLyrics) && artwork.window && cell && sMiniVisible && sMiniVisible();
     if (!want) {
         view.hidden = YES;
+        // Still in the player's view, to keep looking (its display link runs only in a window).
+        UIView *list = AUYandexPlayerLayerOf(artwork);
+        if (list && view.superview != list.superview) [list.superview insertSubview:view aboveSubview:list];
         return;
     }
     // Over the list the player scrolls in (the app draws its folded lyrics in a SwiftUI card there), under the bars.
@@ -965,7 +968,7 @@ void AULyricsMiniUpdate(UIView *artworkView, UIView *cell, BOOL (^visible)(void)
     sMiniArtwork = artworkView;
     if (cell) sMiniCell = cell;
     sMiniVisible = [visible copy];
-    if (visible && visible() && AUEnabled(AUKeyLyrics)) miniView();
+    if (AUEnabled(AUKeyLyrics)) miniView();   // made at once, hidden: it looks a few times a second whether to show
     AULyricsMiniRefresh();
 }
 
