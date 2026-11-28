@@ -22,6 +22,9 @@ NS_ASSUME_NONNULL_BEGIN
 // Fill: the finished frame blurred further down — ramps in shares of the layer's height (from, to), sizes in shares
 // of its width (the blur's radius); the blur is of the drawn frame, so its sharp and soft parts never slide apart.
 - (void)setBlurRamp1:(CGPoint)ramp1 size1:(double)size1 ramp2:(CGPoint)ramp2 size2:(double)size2;
+// Fill: the room painted over the cover blurred upward, from `from` (the layer's share of its height, nearer the
+// cover) to `to` (higher, full `size`).
+- (void)setTopBlurFrom:(double)from to:(double)to size:(double)size;
 - (void)clearBlur;
 - (void)layoutForScale:(CGFloat)scale;
 - (void)render;

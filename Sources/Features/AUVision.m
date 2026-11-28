@@ -926,6 +926,40 @@ static void median3(uint8_t *d, size_t w, size_t h) {
     free(out);
 }
 
+// Drops the connected parts (8-neighbours) of `mask` smaller than `least` pixels: the short jumps the depth model's
+// noise makes inside a coat or a face; only long edges (a body against a wall) are left to tear.
+static void dropSmallParts(uint8_t *mask, size_t w, size_t h, size_t least) {
+    const size_t n = w * h;
+    uint8_t *seen = calloc(n, 1);
+    int32_t *stack = malloc(n * sizeof(int32_t)), *part = malloc(n * sizeof(int32_t));
+    for (size_t start = 0; start < n; start++) {
+        if (!mask[start] || seen[start]) continue;
+        size_t top = 0, count = 0;
+        stack[top++] = (int32_t)start;
+        seen[start] = 1;
+        while (top) {
+            int32_t i = stack[--top];
+            part[count++] = i;
+            long x = i % (long)w, y = i / (long)w;
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    long nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= (long)w || ny >= (long)h) continue;
+                    size_t j = (size_t)ny * w + (size_t)nx;
+                    if (mask[j] && !seen[j]) {
+                        seen[j] = 1;
+                        stack[top++] = (int32_t)j;
+                    }
+                }
+            }
+        }
+        if (count < least) for (size_t k = 0; k < count; k++) mask[part[k]] = 0;
+    }
+    free(seen);
+    free(stack);
+    free(part);
+}
+
 static uint32_t oddKernel(double radius) {
     return (uint32_t)(2 * MAX(0L, lround(radius)) + 1);
 }
@@ -941,25 +975,33 @@ static void solidDepths(const uint8_t *in, size_t side, NSMutableData *front, NS
     const int T = (int)lround(AUTune(@"tear") * 255);
     uint8_t *d = front.mutableBytes, *h = holes.mutableBytes, *b = back.mutableBytes;
     memcpy(d, in, n);
+    // The model's speckle first: a fold of a coat must not read as an edge.
+    median3(d, side, side);
+    median3(d, side, side);
     uint8_t *mn = malloc(n), *mx = malloc(n), *t = malloc(n), *edges = malloc(n), *behind = malloc(n);
     vImage_Buffer D = {d, side, side, side}, MN = {mn, side, side, side}, MX = {mx, side, side, side};
     vImage_Buffer TT = {t, side, side, side}, E = {edges, side, side, side}, BH = {behind, side, side, side}, BB = {b, side, side, side};
     uint32_t k = oddKernel(side * 0.007);   // 9 px at 640
+    size_t least = (size_t)(side * AUTune(@"tearMinLength") / 100 * k);
     vImageMin_Planar8(&D, &MN, NULL, 0, 0, k, k, kvImageEdgeExtend);
     vImageMax_Planar8(&D, &MX, NULL, 0, 0, k, k, kvImageEdgeExtend);
+    // Only long jumps tear; the short ones keep their soft ramp (the surface bends there, it does not open).
+    for (size_t i = 0; i < n; i++) t[i] = mx[i] - mn[i] > T ? 255 : 0;
+    dropSmallParts(t, side, side, least);
     for (size_t i = 0; i < n; i++) {
-        if (mx[i] - mn[i] > T) d[i] = d[i] - mn[i] < mx[i] - d[i] ? mn[i] : mx[i];
+        if (t[i]) d[i] = d[i] - mn[i] < mx[i] - d[i] ? mn[i] : mx[i];
     }
     median3(d, side, side);
     uint32_t g = oddKernel(side * AUTune(@"tearGrow") / 100);
     if (g > 1) {
         vImageMax_Planar8(&D, &MX, NULL, 0, 0, g, g, kvImageEdgeExtend);
-        for (size_t i = 0; i < n; i++) if (mx[i] - d[i] > T) d[i] = mx[i];
+        for (size_t i = 0; i < n; i++) if (t[i] && mx[i] - d[i] > T) d[i] = mx[i];
     }
     // Where the surface tears, and the band a tear can open on its near side.
     vImageMin_Planar8(&D, &MN, NULL, 0, 0, k, k, kvImageEdgeExtend);
     vImageMax_Planar8(&D, &MX, NULL, 0, 0, k, k, kvImageEdgeExtend);
     for (size_t i = 0; i < n; i++) t[i] = mx[i] - mn[i] > T ? 255 : 0;
+    dropSmallParts(t, side, side, least);
     double bandR = side * AUTune(@"tearBand") / 100;
     uint32_t band = oddKernel(bandR);
     vImageMax_Planar8(&TT, &E, NULL, 0, 0, band, band, kvImageEdgeExtend);

@@ -446,6 +446,11 @@ static void applyBlur(AUSurface *surface, CGFloat stageHigh) {
     softRamp(1, &f2, &t2);
     [surface.renderer setBlurRamp1:CGPointMake((f1 * H - y) / h, (t1 * H - y) / h) size1:AUTune(@"blur1Size") / 100
                              ramp2:CGPointMake((f2 * H - y) / h, (t2 * H - y) / h) size2:AUTune(@"blur2Size") / 100];
+    // Over the cover: the painted room blurs upward from a touch inside the cover's top.
+    double side = surface.pictureRect.size.width, coverTop = surface.renderer.frameTop * side, reach = AUTune(@"topBlurReach");
+    if (coverTop > 1 && reach > 0.001) {
+        [surface.renderer setTopBlurFrom:(coverTop + side * 0.03) / h to:(coverTop - side * reach) / h size:AUTune(@"blur2Size") / 100];
+    }
 }
 
 - (void)placeSurface:(AUSurface *)surface stageBounds:(CGRect)bounds {

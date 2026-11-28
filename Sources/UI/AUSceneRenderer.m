@@ -79,11 +79,11 @@ vertex SOut au_sheet(uint vid [[vertex_id]], const device float2 *grid [[buffer(
 }\n\
 fragment half4 au_sheet_color(SOut in [[stage_in]], texture2d<half> color [[texture(0)]], texture2d<float> depth [[texture(1)]]) {\n\
     constexpr sampler s(address::clamp_to_edge, filter::linear);\n\
-    constexpr sampler sn(address::clamp_to_edge, filter::nearest);\n\
-    if (in.nearCut >= 0 && depth.sample(sn, in.uv).r < in.nearCut) discard_fragment();\n\
+    constexpr sampler sl(address::clamp_to_edge, filter::linear);\n\
+    if (in.nearCut >= 0 && depth.sample(sl, in.uv).r < in.nearCut) discard_fragment();\n\
     return half4(color.sample(s, in.uv).rgb, 1);\n\
 }\n\
-struct Blur { float4 ramp1; float4 ramp2; float2 size; };\n\
+struct Blur { float4 ramp1; float4 ramp2; float4 ramp3; float2 size; };\n\
 struct BOut { float4 position [[position]]; float2 uv; };\n\
 vertex BOut au_full(uint vid [[vertex_id]]) {\n\
     float2 p = float2((vid << 1) & 2, vid & 2);\n\
@@ -98,7 +98,8 @@ fragment half4 au_blur(BOut in [[stage_in]], texture2d<half> scene [[texture(0)]
     constexpr sampler s(address::clamp_to_edge, filter::linear, mip_filter::linear);\n\
     float t1 = smoothstep(b.ramp1.x, b.ramp1.y, in.uv.y) * b.ramp1.z;\n\
     float t2 = smoothstep(b.ramp2.x, b.ramp2.y, in.uv.y) * b.ramp2.z;\n\
-    float r = max(t1, t2) * b.size.x;\n\
+    float t3 = (1 - smoothstep(b.ramp3.y, b.ramp3.x, in.uv.y)) * b.ramp3.z;\n\
+    float r = max(max(t1, t2), t3) * b.size.x;\n\
     if (r < 0.6) return half4(scene.sample(s, in.uv, level(0)).rgb, 1);\n\
     float lod = max(0.0, log2(r * 0.5));\n\
     float2 px = r / b.size;\n\
@@ -123,9 +124,9 @@ typedef struct {
 } AUSheet;
 
 typedef struct {
-    float ramp1[4], ramp2[4];
+    float ramp1[4], ramp2[4], ramp3[4];   // ramp3: over the cover, blurring upward (from > to)
     float size[2];
-    float pad[2];               // the shader's struct is 16-aligned: 48 bytes
+    float pad[2];               // the shader's struct is 16-aligned: 64 bytes
 } AUBlurParams;
 
 enum { kGrid = 96 };
@@ -328,8 +329,16 @@ static id<MTLTexture> grayRectTexture(NSData *bytes, size_t width, size_t height
 
 - (void)setBlurRamp1:(CGPoint)ramp1 size1:(double)size1 ramp2:(CGPoint)ramp2 size2:(double)size2 {
     _blurs = size1 > 0.0005 || size2 > 0.0005;
+    _blur.ramp3[2] = 0;   // the top's own ramp comes after, when there is a room over the cover
     _blur.ramp1[0] = (float)ramp1.x; _blur.ramp1[1] = (float)MAX(ramp1.x + 0.001, ramp1.y); _blur.ramp1[2] = (float)size1;
     _blur.ramp2[0] = (float)ramp2.x; _blur.ramp2[1] = (float)MAX(ramp2.x + 0.001, ramp2.y); _blur.ramp2[2] = (float)size2;
+}
+
+- (void)setTopBlurFrom:(double)from to:(double)to size:(double)size {
+    _blur.ramp3[0] = (float)from;
+    _blur.ramp3[1] = (float)MIN(from - 0.001, to);
+    _blur.ramp3[2] = (float)size;
+    if (size > 0.0005) _blurs = YES;
 }
 
 - (void)clearBlur {
@@ -360,6 +369,9 @@ static id<MTLTexture> grayRectTexture(NSData *bytes, size_t width, size_t height
     _medians = medians;
     _reliefs = reliefs;
     _front = _frontDepth = nil;
+    // Nothing of Core Animation moves with a solid scene: its frames need not wait for the main thread's commits
+    // (waiting held the gyro's frames back whenever the GPU was busy).
+    _layer.presentsWithTransaction = _presentsWithTransaction && !scene.solid;
     if (scene.solid) {
         _front = colorTexture(scene.front.CGImage, NO);
         _frontDepth = grayRectTexture(scene.frontBytes, scene.frontSide, scene.frontHigh);
@@ -444,7 +456,7 @@ static id<MTLTexture> grayRectTexture(NSData *bytes, size_t width, size_t height
     float texTall = (float)_texTall, plateTall = (float)MAX(1.0, _scene.plateHigh / (double)MAX((size_t)1, _scene.plateSide));
     // Picture units from the cover's top: the drawn frame runs from -frameTop to texTall - frameTop.
     float frameTop = (float)_frameTop, plateTop = (float)_scene.tallTop;
-    AUCam cam = {{(float)camera.angleX, (float)camera.angleY}, {-0.12f, 1.12f}, {-frameTop - 0.12f, texTall - frameTop + 0.12f},
+    AUCam cam = {{(float)camera.angleX, (float)camera.angleY}, {-0.2f, 1.2f}, {-frameTop - 0.25f, texTall - frameTop + 0.25f},
                  (float)camera.pivot, (float)camera.scale, (float)camera.focal, (float)camera.relief, 0, 0, (float)camera.zFar,
                  (float)camera.zNear, zoom, (float)camera.reliefBack, (float)camera.reliefFront, texTall, plateTall, texTall,
                  (float)_texTop, plateTop, frameTop, 0};
@@ -506,7 +518,7 @@ static id<MTLTexture> grayRectTexture(NSData *bytes, size_t width, size_t height
     if (!drawable) return;
     id<MTLCommandBuffer> buffer = [_queue commandBuffer];
     [self encodeInto:drawable.texture buffer:buffer zoom:1];
-    if (_presentsWithTransaction) {
+    if (_layer.presentsWithTransaction) {
         [buffer commit];
         [buffer waitUntilScheduled];
         [drawable present];

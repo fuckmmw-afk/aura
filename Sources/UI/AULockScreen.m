@@ -94,7 +94,7 @@ static CGImageRef softened(CGImageRef image, double radius) {
 // growing over a third of the screen — in three steps blended row by row, so there is no line where it starts.
 // `square` is the picture (with the room painted below it, when there is one); the blur comes in from `from` to `to`
 // (rows) below, and over the same run above when the picture does not reach the top.
-static void extendCover(CGContextRef base, CGRect square, double side, double from, double to) {
+static void extendCover(CGContextRef base, CGRect square, double side, double from, double to, double coverTop) {
     uint8_t *p = CGBitmapContextGetData(base);
     size_t row = CGBitmapContextGetBytesPerRow(base), w = CGBitmapContextGetWidth(base), h = CGBitmapContextGetHeight(base);
     long top = MAX(0L, MIN((long)h - 1, lround(CGRectGetMinY(square))));
@@ -126,11 +126,13 @@ static void extendCover(CGContextRef base, CGRect square, double side, double fr
     dispatch_apply(h, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t y) {
         long yy = (long)y;
         double progress;
-        if (yy >= (top + bottom) / 2) {
+        // Above the cover's middle the blur grows upward from its top (over the room painted there, or past the
+        // picture's edge), below it toward the foot.
+        if (yy >= coverTop + side / 2) {
             progress = MAX(0.0, MIN(1.0, (yy - belowFrom) / (belowTo - belowFrom)));
         } else {
-            double distance = yy < top ? top - yy : -(double)(yy - top);
-            progress = top > 0 ? MAX(0.0, MIN(1.0, (distance + inside) / (outside + inside))) : 0;
+            double distance = coverTop - yy;
+            progress = coverTop > 0 ? MAX(0.0, MIN(1.0, (distance + inside) / (outside + inside))) : 0;
         }
         uint8_t *o = p + y * row;
         for (int k = 0; k < 3; k++) {
@@ -178,7 +180,7 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
     double footFrom = scene.tall ? margin + size.height * AUTune(@"lockBlurFrom") : margin + top + side - side * 0.16;
     double footTo = scene.tall ? margin + size.height * AUTune(@"lockBlurTo") : margin + top + side + side * 0.5;
     footFrom = MIN(footFrom, margin + top - above + pictureHigh - side * 0.1);
-    extendCover(base, pictureTopDown, side, footFrom, MAX(footFrom + side * 0.15, footTo));
+    extendCover(base, pictureTopDown, side, footFrom, MAX(footFrom + side * 0.15, footTo), top + margin);
     l.background = CGBitmapContextCreateImage(base);
     l.base = base;
     l.frontTop = top - above;
@@ -196,8 +198,11 @@ static AUClipLayers makeLayers(AUScene *scene, CGSize size, BOOL moving) {
             uint8_t *fp = CGBitmapContextGetData(fc);
             size_t frow = CGBitmapContextGetBytesPerRow(fc);
             double fadeFrom = (footFrom - margin - (top - above)) * fw / side, fadeTo = fadeFrom + 0.15 * fw;
+            // And over the cover, where the painted room blurs upward: gone a sixth of the side above its top.
+            double coverRow = scene.tallTop * fw, upTo = coverRow - fw / 6.0;
             for (size_t y = 0; y < fh; y++) {
                 double t = MAX(0.0, MIN(1.0, (y - fadeFrom) / (fadeTo - fadeFrom)));
+                if (coverRow > 1) t = MAX(t, MAX(0.0, MIN(1.0, (coverRow - y) / (coverRow - upTo))));
                 t = t * t * (3 - 2 * t);
                 if (t <= 0) continue;
                 uint32_t keep = (uint32_t)lround((1 - t) * 256);

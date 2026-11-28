@@ -20,6 +20,9 @@ AUCamera AUSceneCamera(AUScene *scene, CGPoint tilt, double strength) {
     BOOL adapt = AUTuneOn(@"adaptive");
     double styleSwing = adapt ? scene.styleSwing : 1, styleDeep = adapt ? scene.styleDeep : 1, styleRelief = adapt ? scene.styleRelief : 1;
     c.scale = MIN(1.6, AUTune(@"deep") * styleDeep / MAX(0.15, c.pivot - low));
+    // The solid surface: the whole depth range (near to far) spans «Глубина комнаты»; at a full swing its gaps stay
+    // within the band LaMa painted behind every tear.
+    if (scene.solid) c.scale = AUTune(@"solidDepth") * styleDeep / MAX(0.15, front - low);
     c.focal = AUTune(@"focal");
     c.relief = AUTune(@"relief") * styleRelief;
     c.reliefBack = AUTune(@"reliefBack");

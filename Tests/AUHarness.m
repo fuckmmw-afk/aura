@@ -71,6 +71,8 @@ static CGImageRef fillGPU(AUScene *scene, CGPoint tilt) {
     double y = pic.origin.y, h = pic.size.height;
     [r setBlurRamp1:CGPointMake((f1 * H - y) / h, (t1 * H - y) / h) size1:AUTune(@"blur1Size") / 100
               ramp2:CGPointMake((f2 * H - y) / h, (t2 * H - y) / h) size2:AUTune(@"blur2Size") / 100];
+    double coverTop = r.frameTop * side;
+    if (coverTop > 1) [r setTopBlurFrom:(coverTop + side * 0.03) / h to:(coverTop - side * AUTune(@"topBlurReach")) / h size:AUTune(@"blur2Size") / 100];
     CGImageRef image = NULL;
     size_t pw = (size_t)lround(side * scale), ph = (size_t)lround(side * tall * scale);
     for (int wait = 0; wait < 80 && !(image = [r renderImageWidth:pw height:ph]); wait++) {
